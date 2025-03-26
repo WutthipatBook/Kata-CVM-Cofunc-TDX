@@ -1,5 +1,0 @@
-{"timestamp": 1739429489.7438014, "t_boot": 1.1638143062591553, "t_exec": 28.850385189056396, "t_encrypt_exec": 0.059429975, "t_attest_import": 0.238328431, "t_grant_import": 0.030198943, "t_delegate_import": -1e-09}
-{"timestamp": 1739429519.8997467, "t_boot": 1.0239877700805664, "t_exec": 28.771067142486572, "t_encrypt_exec": 0.059339319, "t_attest_import": 0.23860814, "t_grant_import": 0.029665393, "t_delegate_import": -1e-09}
-{"timestamp": 1739429550.7554252, "t_boot": 1.6681945323944092, "t_exec": 28.821760654449463, "t_encrypt_exec": 0.059235194, "t_attest_import": 0.238433599, "t_grant_import": 0.02879533, "t_delegate_import": -1e-09}
-{"timestamp": 1739429580.9818053, "t_boot": 1.0686485767364502, "t_exec": 28.78389286994934, "t_encrypt_exec": 0.059373818, "t_attest_import": 0.238641157, "t_grant_import": 0.030113934, "t_delegate_import": -1e-09}
-{"timestamp": 1739429611.207727, "t_boot": 1.0391349792480469, "t_exec": 28.8221218585968, "t_encrypt_exec": 0.059264132, "t_attest_import": 0.238768189, "t_grant_import": 0.030135441, "t_delegate_import": -1e-09}

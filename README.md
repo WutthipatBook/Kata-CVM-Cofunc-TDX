@@ -86,4 +86,4 @@ Run the script `scripts/run_fig11.sh`. This script executes the functions with d
 
 Run the script `scripts/run_finra.sh`. This script executes FINRA application with different runtimes and outputs the latencies to the `log` directory. The end-to-end application latencies and the optimization of CoFunc compared with Kata-CVM can be found in `plots/finra.txt`.
 
-Before running the experiments, the `log` and `plots` directories contain the expected results generated on the authors' machine. New experiments will overwrite these data.
+Before running the experiments, the `plots` directories contain the expected results generated on the authors' machine. New experiments will overwrite these data.
