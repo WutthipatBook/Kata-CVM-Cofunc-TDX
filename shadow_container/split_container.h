@@ -1,5 +1,6 @@
 #pragma once
 #include "config.h"
+#include <stdint.h>
 #include <poll.h>
 #include <signal.h>
 #include <semaphore.h>
@@ -10,6 +11,74 @@
 
 #define KVM_SC_GET_VM		_IO(KVMIO,    0x10)
 #define KVM_SC_ALLOC_VCPU	_IO(KVMIO,    0x11)
+
+#ifndef KVM_MEM_GUEST_MEMFD
+#define KVM_MEM_GUEST_MEMFD     (1UL << 2)
+#endif
+
+#ifndef KVM_SET_USER_MEMORY_REGION2
+struct kvm_userspace_memory_region2 {
+        uint32_t slot;
+        uint32_t flags;
+        uint64_t guest_phys_addr;
+        uint64_t memory_size;
+        uint64_t userspace_addr;
+        uint64_t guest_memfd_offset;
+        uint32_t guest_memfd;
+        uint32_t pad1;
+        uint64_t pad2[14];
+};
+
+#define KVM_SET_USER_MEMORY_REGION2 _IOW(KVMIO, 0x49, struct kvm_userspace_memory_region2)
+#endif
+
+#ifndef KVM_CREATE_GUEST_MEMFD
+struct kvm_create_guest_memfd {
+        uint64_t size;
+        uint64_t flags;
+        uint64_t reserved[6];
+};
+
+#define GUEST_MEMFD_FLAG_MMAP        (1ULL << 0)
+#define GUEST_MEMFD_FLAG_INIT_SHARED (1ULL << 1)
+#define KVM_CREATE_GUEST_MEMFD _IOWR(KVMIO, 0xd4, struct kvm_create_guest_memfd)
+#endif
+
+#ifndef KVM_HC_MAP_GPA_RANGE
+#define KVM_HC_MAP_GPA_RANGE    12
+#endif
+
+#ifndef KVM_MAP_GPA_RANGE_ENC_STAT
+#define KVM_MAP_GPA_RANGE_PAGE_SZ_4K   0
+#define KVM_MAP_GPA_RANGE_PAGE_SZ_2M   (1 << 0)
+#define KVM_MAP_GPA_RANGE_PAGE_SZ_1G   (1 << 1)
+#define KVM_MAP_GPA_RANGE_ENC_STAT(n)  ((n) << 4)
+#define KVM_MAP_GPA_RANGE_ENCRYPTED    KVM_MAP_GPA_RANGE_ENC_STAT(1)
+#define KVM_MAP_GPA_RANGE_DECRYPTED    KVM_MAP_GPA_RANGE_ENC_STAT(0)
+#endif
+
+#ifndef KVM_MEMORY_ATTRIBUTE_PRIVATE
+struct kvm_memory_attributes {
+        uint64_t address;
+        uint64_t size;
+        uint64_t attributes;
+        uint64_t flags;
+};
+
+#define KVM_SET_MEMORY_ATTRIBUTES _IOW(KVMIO, 0xd2, struct kvm_memory_attributes)
+#define KVM_MEMORY_ATTRIBUTE_PRIVATE (1ULL << 3)
+#endif
+
+#ifndef KVM_PRE_FAULT_MEMORY
+struct kvm_pre_fault_memory {
+        uint64_t gpa;
+        uint64_t size;
+        uint64_t flags;
+        uint64_t padding[5];
+};
+
+#define KVM_PRE_FAULT_MEMORY _IOWR(KVMIO, 0xd5, struct kvm_pre_fault_memory)
+#endif
 
 #if defined(CONFIG_PLAT_INTEL_TDX)
 #define VMCALL_SC_VCPU_IDLE     0x10010
@@ -396,4 +465,3 @@ struct sc_shm {
         };
         char data[0];
 };
-

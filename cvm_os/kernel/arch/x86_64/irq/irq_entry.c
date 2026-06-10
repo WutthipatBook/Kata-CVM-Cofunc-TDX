@@ -158,6 +158,19 @@ void handle_irq(int irqno)
 
 	switch (irqno) {
 	case IRQ_TIMER:
+#ifdef CHCORE_SPLIT_CONTAINER
+		/*
+		 * Split-container can run threads that intentionally have no
+		 * scheduling context. They cannot participate in timeslice
+		 * accounting, so acknowledge/rearm the local timer without
+		 * invoking the scheduler on those threads.
+		 */
+		if (current_thread && current_thread->thread_ctx &&
+		    !current_thread->thread_ctx->sc) {
+			plat_handle_timer_irq(TICK_MS * 1000 * tick_per_us);
+			return;
+		}
+#endif /* CHCORE_SPLIT_CONTAINER */
 		handle_timer_irq();
 
 		/* Start the scheduler */

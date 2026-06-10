@@ -279,7 +279,13 @@ _docker_run() {
             --privileged \
             -v $(pwd):$(pwd) -w $(pwd) \
             billsjcdocker/chcore_builder:v1.8.3-cvm \
-            $self $@
+            bash -lc '
+                if ! command -v mformat >/dev/null 2>&1; then
+                    apt-get update
+                    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends mtools
+                fi
+                exec "$@"
+            ' _ $self $@
     fi
 }
 

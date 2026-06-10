@@ -26,15 +26,29 @@ add_custom_target(
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/chcore.iso
         DESTINATION ${CMAKE_INSTALL_PREFIX})
 
-# Note: `$basedir` is a shell variable in `emulate.tpl.sh`
+# Note: `$basedir` is a shell variable in `emulate.tpl.sh`.
+# Paths are intentionally overridable because this artifact is migrated between
+# local and server hosts.
+set(COFUNC_TDX_QEMU
+    "\${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}"
+)
+set(COFUNC_TDX_OVMF
+    "\${COFUNC_TDX_OVMF:-/mnt/nvme_500g/cofunc_tdx_artifact/firmware/ovmf-inteltdx_2025.02-8ubuntu3.1/usr/share/ovmf/OVMF.inteltdx.fd}"
+)
+set(COFUNC_TDX_QEMU_BIOS_DIR "\${COFUNC_TDX_QEMU_BIOS_DIR:-/usr/share/qemu}")
+set(COFUNC_TDX_SMP "\${COFUNC_TDX_SMP:-32}")
+set(COFUNC_TDX_QEMU_BASE_OPTIONS
+    "-L ${COFUNC_TDX_QEMU_BIOS_DIR} -accel kvm -cpu host -object tdx-guest,id=tdx0 -machine q35,confidential-guest-support=tdx0,kernel-irqchip=split,smm=off -bios ${COFUNC_TDX_OVMF} -m 4G -smp ${COFUNC_TDX_SMP} -nodefaults -nographic -display none -serial mon:stdio -no-reboot -boot c -drive file=\$basedir/chcore.iso,if=none,id=bootdisk,format=raw,readonly=on -device virtio-blk-pci,drive=bootdisk,bootindex=1"
+)
+
 if (CHCORE_KERNEL_ENABLE_QEMU_VIRTIO_NET)
     chcore_generate_emulate_sh(
-        "qemu-system-x86_64"
-        "--enable-kvm -m 4G -cpu host -smp 4 -serial mon:stdio -nographic -cdrom \$basedir/chcore.iso -nic user,model=virtio-net-pci,hostfwd=tcp::1234-:9000,hostfwd=tcp::4096-:4096"
+        "${COFUNC_TDX_QEMU}"
+        "${COFUNC_TDX_QEMU_BASE_OPTIONS} -nic user,model=virtio-net-pci,hostfwd=tcp::1234-:9000,hostfwd=tcp::4096-:4096"
     )
 else()
     chcore_generate_emulate_sh(
-        "qemu-system-x86_64"
-        "--enable-kvm -m 4G -cpu host -smp 4 -serial mon:stdio -nographic -cdrom \$basedir/chcore.iso"
+        "${COFUNC_TDX_QEMU}"
+        "${COFUNC_TDX_QEMU_BASE_OPTIONS}"
     )
 endif()

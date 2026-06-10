@@ -16,6 +16,11 @@ slot_id=${SLOT_ID:-0}
 # fi
 
 cpu_param="--cpuset-cpus 0"
+docker_tty=${COFUNC_DOCKER_TTY:-1}
+docker_stdio=(-it)
+if [[ $docker_tty == 0 ]]; then
+        docker_stdio=(-i)
+fi
 
 if [[ $runtime == "runc" ]]; then
         command=$command
@@ -52,7 +57,7 @@ for i in $(seq $times); do
 
         printf "t_begin %s\n" $t_begin | tee -a $exec_log
 
-        docker run -it --rm --privileged --net=host $cpu_param --name $name \
+        docker run "${docker_stdio[@]}" --rm --privileged --net=host $cpu_param --name $name \
                 -v /dev:/dev --tmpfs /tmp --tmpfs /run \
                 $fn_name /tools/start.sh $command | tee -a $exec_log
 

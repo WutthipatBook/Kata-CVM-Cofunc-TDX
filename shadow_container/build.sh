@@ -1,3 +1,3 @@
 #!/bin/bash
 
-docker build -t split_container_builder .
+docker build --build-arg COFUNC_PLAT="${COFUNC_PLAT:-amd_sev}" -t split_container_builder .

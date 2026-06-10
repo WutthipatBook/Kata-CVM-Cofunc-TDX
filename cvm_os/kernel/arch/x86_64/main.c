@@ -31,7 +31,6 @@
 #ifdef CHCORE_PLAT_AMD_SEV
 #include <sev.h>
 #endif /* CHCORE_PLAT_AMD_SEV */
-// #include <tdx.h>
 // #include <arch/time.h>
 
 /* Global big kernel lock */

@@ -137,6 +137,11 @@ u8 get_cpu_apic_id(int cpu_id)
 	return madt_info.local_apic_ids[cpu_id];
 }
 
+u8 get_cpu_count(void)
+{
+	return madt_info.processor_count;
+}
+
 void madt_wakeup_cpu(int apic_id, u64 wakeup_vector)
 {
 	mp_wakeup_mailbox->apic_id = apic_id;

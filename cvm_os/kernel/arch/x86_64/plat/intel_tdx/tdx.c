@@ -191,7 +191,10 @@ static unsigned long try_accept_one(paddr_t start, unsigned long len,
 	if ((ret = __tdx_module_call(TDX_ACCEPT_PAGE, tdcall_rcx, 0, 0, 0, NULL))) {
 		if ((ret >> 32) == 0xB0A)
 			return accept_size;
-		printk("2M reject reason: 0x%lx, 0x%lx, %d\n", ret, start, (int)page_size);
+		kdebug("TDX accept reject reason: 0x%lx, 0x%lx, %d\n",
+		       ret,
+		       start,
+		       (int)page_size);
 		return 0;
 	}
 
