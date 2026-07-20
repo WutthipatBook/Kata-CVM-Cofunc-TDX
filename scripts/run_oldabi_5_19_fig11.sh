@@ -19,6 +19,7 @@ HOST_PYTHON_SITE="${HOST_PYTHON_SITE:-/home/booklyn/.local/lib/python3.10/site-p
 TDX_SMP="${COFUNC_TDX_SMP:-16}"
 KVM_BUSY_RETRIES="${COFUNC_KVM_BUSY_RETRIES:-3}"
 KVM_BUSY_COOLDOWN_SEC="${COFUNC_KVM_BUSY_COOLDOWN_SEC:-20}"
+RUNTIME_REPETITIONS="${COFUNC_OLDABI_RUNTIME_REPETITIONS:-}"
 RUN_START_EPOCH=""
 
 FIG11_WORKLOADS=(
@@ -104,17 +105,22 @@ require_paths() {
 	[[ $TDX_SMP =~ ^[0-9]+$ && $TDX_SMP -gt 0 ]] || die "invalid COFUNC_TDX_SMP=$TDX_SMP"
 	[[ $KVM_BUSY_RETRIES =~ ^[0-9]+$ && $KVM_BUSY_RETRIES -gt 0 ]] || die "invalid COFUNC_KVM_BUSY_RETRIES=$KVM_BUSY_RETRIES"
 	[[ $KVM_BUSY_COOLDOWN_SEC =~ ^[0-9]+$ ]] || die "invalid COFUNC_KVM_BUSY_COOLDOWN_SEC=$KVM_BUSY_COOLDOWN_SEC"
+	if [[ -n $RUNTIME_REPETITIONS ]]; then
+		[[ $RUNTIME_REPETITIONS =~ ^[0-9]+$ && $RUNTIME_REPETITIONS -gt 0 ]] \
+			|| die "invalid COFUNC_OLDABI_RUNTIME_REPETITIONS=$RUNTIME_REPETITIONS"
+	fi
 }
 
 write_selected_params() {
 	local params="$OUT/run_sc_fork.params"
-	python3 - "$TASK/params" "$params" "${FIG11_WORKLOADS[@]}" <<'PY'
+	python3 - "$TASK/params" "$params" "$RUNTIME_REPETITIONS" "${FIG11_WORKLOADS[@]}" <<'PY'
 import sys
 from pathlib import Path
 
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
-wanted = sys.argv[3:]
+repetitions = sys.argv[3]
+wanted = sys.argv[4:]
 rows = {}
 for line in src.read_text().splitlines():
     if not line.strip():
@@ -124,7 +130,9 @@ for line in src.read_text().splitlines():
 missing = [fn for fn in wanted if fn not in rows]
 if missing:
     raise SystemExit("missing workload params: " + ", ".join(missing))
-dst.write_text("\n".join(f"{fn} {rows[fn]}" for fn in wanted) + "\n")
+dst.write_text(
+    "\n".join(f"{fn} {repetitions or rows[fn]}" for fn in wanted) + "\n"
+)
 PY
 }
 
@@ -223,6 +231,7 @@ main() {
 		echo "tdx_smp=$TDX_SMP"
 		echo "kvm_busy_retries=$KVM_BUSY_RETRIES"
 		echo "kvm_busy_cooldown_sec=$KVM_BUSY_COOLDOWN_SEC"
+		echo "runtime_repetitions=${RUNTIME_REPETITIONS:-default}"
 		echo "thp_enabled=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true)"
 		echo "thp_defrag=$(cat /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true)"
 		printf 'selected_workloads='

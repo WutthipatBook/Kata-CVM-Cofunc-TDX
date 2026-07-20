@@ -104,3 +104,19 @@ The isolated validation boundary is passed. The next bounded step is one
 memory-intensive workload smoke with the same one-attempt and safety-gate
 rules. Churn and full-matrix measurements remain out of scope until that
 step is clean.
+
+## Excluded mislabeled DNA attempt
+
+The directory
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_dna_smoke_20260720_142136`
+is not DNA evidence. Although its runner and safety gates returned zero, the
+lower-level runner interpreted `STOP_AFTER_SMOKE=1` as its mandatory
+face-detection smoke and exited before the selected DNA workload. Its only
+result is `smoke-log/fn_py_face_detection/sc_fork.log` with
+`t_e2e=3.551 s`; no DNA log exists.
+
+To make bounded non-face validation explicit, the orchestration runner now
+accepts `COFUNC_OLDABI_RUNTIME_REPETITIONS`. A one-shot non-face run must use
+`STOP_AFTER_SMOKE=0`, `COFUNC_OLDABI_SKIP_FACE_SMOKE=1`, a single
+`COFUNC_OLDABI_RUNTIME_WORKLOADS` entry, and
+`COFUNC_OLDABI_RUNTIME_REPETITIONS=1`.
