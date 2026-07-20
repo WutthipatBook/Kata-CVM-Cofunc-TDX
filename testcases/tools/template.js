@@ -30,6 +30,7 @@ if (process.argv[2] == '--sc-snapshot') {
   sc.sc_snapshot();
 }
 
+t_func_load_begin = Date.now() / 1000;
 fn_code = __fs.readFileSync('/func/execute.js') + '';
 
 t_attest_after_import = sc.stat_get_stat(0x3);
@@ -57,6 +58,7 @@ SendRequest('http://127.0.0.1:8888/get_param', {
       t_delegate_after_exec = sc.stat_get_stat(0x6);
       n_cow = sc.stat_get_stat(0x2);
       t_func_done = Date.now() / 1000;
+      console.log(`t_func_load_begin ${t_func_load_begin}`);
       console.log(`t_import_done ${t_import_done}`);
       console.log(`t_func_done ${t_func_done}`);
       if (n_hcalls_before_exec >= 0) {

@@ -1,7 +1,18 @@
-import sys, ctypes, time, os, json, sc
+import sys, ctypes, time, os, json, resource, sc
 import urllib.parse, urllib.request
 libc = ctypes.CDLL(None)
 sys.dont_write_bytecode = True
+
+
+def fault_trace_signal(phase):
+    base_url = os.environ.get("COFUNC_EPT_TRACE_URL")
+    if not base_url:
+        return
+    with urllib.request.urlopen(f"{base_url}/{phase}", timeout=30) as response:
+        if response.status != 204:
+            raise RuntimeError(
+                f"fault trace signal {phase} returned HTTP {response.status}"
+            )
 
 SYS_SC_SNAPSHOT       = 0x1000
 SYS_SC_PRINT_STAT     = 0x1001
@@ -69,10 +80,14 @@ elif sys.argv[1] == "--lean-fork":
         os.wait()
         os._exit(0)
 
+t_func_load_begin = time.time()
 with open("/func/execute.py") as file:
     fn_code = file.read()
 
 t_attest_after_import = libc.syscall(SYS_SC_GET_STAT, STAT_T_ATTEST)
+fault_trace_signal("begin")
+usage_before_exec = resource.getrusage(resource.RUSAGE_SELF)
+cpu_before_exec = time.process_time()
 t_import_done = time.time()
 
 t_network = 0
@@ -95,10 +110,21 @@ n_cow = libc.syscall(SYS_SC_GET_STAT, STAT_N_COWS)
 # libc.syscall(SYS_SC_DEFER_ENCRYPT, 0)
 
 t_func_done = time.time()
+cpu_after_exec = time.process_time()
+usage_after_exec = resource.getrusage(resource.RUSAGE_SELF)
+fault_trace_signal("end")
 
 # libc.syscall(SYS_SC_PRINT_STAT, b"func_done\0")
+print(f"t_func_load_begin {t_func_load_begin}")
 print(f"t_import_done {t_import_done}")
-# print(f"t_network {t_network}")
+print(f"t_network {t_network}")
+print(f"t_cpu_exec {cpu_after_exec - cpu_before_exec}")
+print(f"n_minflt_exec {usage_after_exec.ru_minflt - usage_before_exec.ru_minflt}")
+print(f"n_majflt_exec {usage_after_exec.ru_majflt - usage_before_exec.ru_majflt}")
+print(f"n_nvcsw_exec {usage_after_exec.ru_nvcsw - usage_before_exec.ru_nvcsw}")
+print(f"n_nivcsw_exec {usage_after_exec.ru_nivcsw - usage_before_exec.ru_nivcsw}")
+print(f"n_inblock_exec {usage_after_exec.ru_inblock - usage_before_exec.ru_inblock}")
+print(f"n_oublock_exec {usage_after_exec.ru_oublock - usage_before_exec.ru_oublock}")
 print(f"t_func_done {t_func_done}")
 if t_fork_begin is not None:
     print(f"t_fork_begin {t_fork_begin}")
