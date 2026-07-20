@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 20 Jul 2026 00:00:00 +0000
+Subject: [PATCH] split-container: add opt-in private memory pre-fault
+
+Add a build-time experiment mode that accepts the complete private allocator
+data range during split-container initialization. Mark each acceptance-sized
+allocator chunk as accepted so the normal allocation path does not attempt a
+second conversion later.
+
+The mode remains disabled by default in config.cmake. Enable it in the active
+old-ABI experiment config so the checkpoint branch retains the original
+on-demand behavior.
+---
+ cvm_os/.config                                  |  1 +
+ cvm_os/config.cmake                             |  1 +
+ .../kernel/split-container/split_container.c    | 39 +++++++++++++++++++
+ 3 files changed, 41 insertions(+)
+
+diff --git a/cvm_os/.config b/cvm_os/.config
+index 6dd91c9..c789f96 100644
+--- a/cvm_os/.config
++++ b/cvm_os/.config
+@@ -11,6 +11,7 @@ CHCORE_QEMU:BOOL=OFF
+ CHCORE_MINI:BOOL=OFF
+ CHCORE_SPLIT_CONTAINER:BOOL=ON
+ CHCORE_SPLIT_CONTAINER_HPAGE:BOOL=ON
++CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=ON
+ CHCORE_SPLIT_CONTAINER_LIBTMPFS:BOOL=ON
+ CHCORE_SPLIT_CONTAINER_SYNC:BOOL=ON
+ CHCORE_KERNEL_DEBUG:BOOL=OFF
+diff --git a/cvm_os/config.cmake b/cvm_os/config.cmake
+index 7f566cc..1410493 100644
+--- a/cvm_os/config.cmake
++++ b/cvm_os/config.cmake
+@@ -21,6 +21,7 @@ chcore_config(CHCORE_QEMU BOOL OFF "Run in QEMU?")
+ chcore_config(CHCORE_MINI BOOL OFF "Build chcore as small as possible?")
+ chcore_config(CHCORE_SPLIT_CONTAINER BOOL OFF "Build split container?")
+ chcore_config(CHCORE_SPLIT_CONTAINER_HPAGE BOOL ON "Split container: use EPT huge page")
++chcore_config(CHCORE_SPLIT_CONTAINER_PREFAULT BOOL OFF "Split container: pre-fault private memory")
+ chcore_config(CHCORE_SPLIT_CONTAINER_LIBTMPFS BOOL ON "Split container: use libtmpfs")
+ chcore_config(CHCORE_SPLIT_CONTAINER_SYNC BOOL ON "Split container: use sync primitives")
+ 
+diff --git a/cvm_os/kernel/split-container/split_container.c b/cvm_os/kernel/split-container/split_container.c
+index 9676649..2020260 100644
+--- a/cvm_os/kernel/split-container/split_container.c
++++ b/cvm_os/kernel/split-container/split_container.c
+@@ -195,6 +195,10 @@ static unsigned long init_mem_pool(paddr_t base, size_t size, int enc)
+         return t;
+ }
+ 
++#ifdef CHCORE_SPLIT_CONTAINER_PREFAULT
++static unsigned long prefault_private_mem_pool(void);
++#endif /* CHCORE_SPLIT_CONTAINER_PREFAULT */
++
+ static long init_mem(void)
+ {
+         u64 mem_size, gpa, slot;
+@@ -231,6 +235,9 @@ static long init_mem(void)
+         t += init_mem_pool(gpa, shared_pool_size, 0);
+ #endif /* FAST_SHARED_POOL */
+         t += init_mem_pool(gpa + shared_pool_size, mem_size - shared_pool_size, 1);
++#ifdef CHCORE_SPLIT_CONTAINER_PREFAULT
++        t += prefault_private_mem_pool();
++#endif /* CHCORE_SPLIT_CONTAINER_PREFAULT */
+ 
+         sc_cpu->mm.shared_pool_size = shared_pool_size;
+ 
+@@ -260,5 +267,37 @@ extern void __buddy_free_pages(struct phys_mem_pool *, struct page *page);
+ #define ACCEPT_PAGE_SIZE PAGE_SIZE
+ #endif /* CHCORE_SPLIT_CONTAINER_HPAGE */
++
++#ifdef CHCORE_SPLIT_CONTAINER_PREFAULT
++static unsigned long prefault_private_mem_pool(void)
++{
++        struct phys_mem_pool *mem_pool = sc_cpu->mm.private_mem_pool;
++        unsigned long start = mem_pool->pool_start_addr;
++        unsigned long size = mem_pool->pool_mem_size;
++        unsigned long addr;
++        unsigned long gpa;
++        unsigned long t0, t1;
++        struct page *hpage;
++
++        BUG_ON(start % ACCEPT_PAGE_SIZE);
++        BUG_ON(size % ACCEPT_PAGE_SIZE);
++
++        gpa = virt_to_phys((void *)start);
++        t0 = get_cycles();
++        change_phys_state(gpa, gpa + size, 1);
++        t1 = get_cycles();
++
++        for (addr = start; addr < start + size; addr += ACCEPT_PAGE_SIZE) {
++                hpage = __virt_to_page(mem_pool, (void *)addr);
++                BUG_ON(hpage->sc_accepted);
++                hpage->sc_accepted = 1;
++        }
++
++        printk("CoFunc private pre-fault: gpa=0x%lx bytes=%lu chunks=%lu cycles=%lu\n",
++               gpa, size, size / ACCEPT_PAGE_SIZE, t1 - t0);
++        return t1 - t0;
++}
++#endif /* CHCORE_SPLIT_CONTAINER_PREFAULT */
++
+ void *split_container_get_pages(int order, int enc)
+ {
+         struct page *page, *hpage;
+-- 
+2.43.0
