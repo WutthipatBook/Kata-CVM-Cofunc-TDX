@@ -21,6 +21,7 @@ chcore_config(CHCORE_QEMU BOOL OFF "Run in QEMU?")
 chcore_config(CHCORE_MINI BOOL OFF "Build chcore as small as possible?")
 chcore_config(CHCORE_SPLIT_CONTAINER BOOL OFF "Build split container?")
 chcore_config(CHCORE_SPLIT_CONTAINER_HPAGE BOOL ON "Split container: use EPT huge page")
+chcore_config(CHCORE_SPLIT_CONTAINER_PREFAULT BOOL OFF "Split container: pre-fault private memory")
 chcore_config(CHCORE_SPLIT_CONTAINER_LIBTMPFS BOOL ON "Split container: use libtmpfs")
 chcore_config(CHCORE_SPLIT_CONTAINER_SYNC BOOL ON "Split container: use sync primitives")
 

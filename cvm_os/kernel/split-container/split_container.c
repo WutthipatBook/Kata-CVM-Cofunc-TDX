@@ -195,6 +195,10 @@ static unsigned long init_mem_pool(paddr_t base, size_t size, int enc)
         return t;
 }
 
+#ifdef CHCORE_SPLIT_CONTAINER_PREFAULT
+static unsigned long prefault_private_mem_pool(void);
+#endif /* CHCORE_SPLIT_CONTAINER_PREFAULT */
+
 static long init_mem(void)
 {
         u64 mem_size, gpa, slot;
@@ -231,6 +235,9 @@ static long init_mem(void)
         t += init_mem_pool(gpa, shared_pool_size, 0);
 #endif /* FAST_SHARED_POOL */
         t += init_mem_pool(gpa + shared_pool_size, mem_size - shared_pool_size, 1);
+#ifdef CHCORE_SPLIT_CONTAINER_PREFAULT
+        t += prefault_private_mem_pool();
+#endif /* CHCORE_SPLIT_CONTAINER_PREFAULT */
 
         sc_cpu->mm.shared_pool_size = shared_pool_size;
 
@@ -259,6 +266,38 @@ extern void __buddy_free_pages(struct phys_mem_pool *, struct page *page);
 #else /* CHCORE_SPLIT_CONTAINER_HPAGE */
 #define ACCEPT_PAGE_SIZE PAGE_SIZE
 #endif /* CHCORE_SPLIT_CONTAINER_HPAGE */
+
+#ifdef CHCORE_SPLIT_CONTAINER_PREFAULT
+static unsigned long prefault_private_mem_pool(void)
+{
+        struct phys_mem_pool *mem_pool = sc_cpu->mm.private_mem_pool;
+        unsigned long start = mem_pool->pool_start_addr;
+        unsigned long size = mem_pool->pool_mem_size;
+        unsigned long addr;
+        unsigned long gpa;
+        unsigned long t0, t1;
+        struct page *hpage;
+
+        BUG_ON(start % ACCEPT_PAGE_SIZE);
+        BUG_ON(size % ACCEPT_PAGE_SIZE);
+
+        gpa = virt_to_phys((void *)start);
+        t0 = get_cycles();
+        change_phys_state(gpa, gpa + size, 1);
+        t1 = get_cycles();
+
+        for (addr = start; addr < start + size; addr += ACCEPT_PAGE_SIZE) {
+                hpage = __virt_to_page(mem_pool, (void *)addr);
+                BUG_ON(hpage->sc_accepted);
+                hpage->sc_accepted = 1;
+        }
+
+        printk("CoFunc private pre-fault: gpa=0x%lx bytes=%lu chunks=%lu cycles=%lu\n",
+               gpa, size, size / ACCEPT_PAGE_SIZE, t1 - t0);
+        return t1 - t0;
+}
+#endif /* CHCORE_SPLIT_CONTAINER_PREFAULT */
+
 void *split_container_get_pages(int order, int enc)
 {
         struct page *page, *hpage;
