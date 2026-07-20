@@ -1,0 +1,7 @@
+diff --git a/shadow_container/config.h b/shadow_container/config.h
+index e778466..6704ec7 100644
+--- a/shadow_container/config.h
++++ b/shadow_container/config.h
+@@ -1 +1 @@
+-#define CONFIG_PLAT_AMD_SEV
++#define CONFIG_PLAT_INTEL_TDX

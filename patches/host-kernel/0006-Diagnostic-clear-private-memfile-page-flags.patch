@@ -1,0 +1,70 @@
+From 33a7c9b6f4fbc2a9a21d6d3ee2f1c9f5a7d0c006 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Tue, 30 Jun 2026 09:15:00 +0000
+Subject: [PATCH] KVM: Diagnostic clear private memfile page flags
+
+The old-ABI TDX bad-page reports are dominated by PG_referenced, with a few
+PG_dirty cases. Skipping KVM's normal dirty/accessed helpers did not eliminate
+the warnings, and the private backing path obtains pages from shmem with
+SGP_WRITE, which marks newly allocated folios referenced before KVM installs
+them into the TD.
+
+As a narrower diagnostic, clear PG_referenced and PG_dirty on pages that flow
+through KVM private memfile PFN release paths, including the final TDX SEPT
+unpin path. If this reduces the bad-page reports or page-fault/grant timing,
+the contamination is in the private-page lifetime rather than generic KVM A/D
+flag updates or THP.
+---
+ arch/x86/kvm/vmx/tdx.c  | 7 +++++--
+ include/linux/kvm_host.h | 12 ++++++++++++
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -2333,6 +2333,17 @@ static inline void kvm_arch_update_mem_attr(struct kvm *kvm, unsigned int attr,
+ #endif /* __KVM_HAVE_ARCH_UPDATE_MEM_ATTR */
+ 
+ #ifdef CONFIG_HAVE_KVM_PRIVATE_MEM
++static inline void kvm_private_mem_clear_page_flags(struct page *page)
++{
++	/*
++	 * CoFunc old-ABI private PFN flag cleanup diagnostic: shmem_get_pfn()
++	 * uses SGP_WRITE, which marks newly allocated private-memfile folios
++	 * referenced before KVM installs them into the TD.
++	 */
++	ClearPageReferenced(page);
++	ClearPageDirty(page);
++}
++
+ static inline int kvm_private_mem_get_pfn(struct kvm_memory_slot *slot,
+ 					  gfn_t gfn, kvm_pfn_t *pfn, int *order)
+ {
+@@ -2352,6 +2363,7 @@ static inline int kvm_private_mem_get_pfn(struct kvm_memory_slot *slot,
+ static inline void kvm_private_mem_put_pfn(struct kvm_memory_slot *slot,
+ 					   kvm_pfn_t pfn)
+ {
++	kvm_private_mem_clear_page_flags(pfn_to_page(pfn));
+ 	slot->notifier.bs->put_pfn(pfn_to_pfn_t(pfn));
+ }
+ #endif /* CONFIG_HAVE_KVM_PRIVATE_MEM */
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -1876,14 +1876,17 @@ static void tdx_unpin(struct kvm *kvm, gfn_t gfn, kvm_pfn_t pfn,
+ {
+ 	struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
+ 	int i;
++	bool private_slot = kvm_slot_can_be_private(slot);
+ 
+ 	for (i = 0; i < KVM_PAGES_PER_HPAGE(level); i++) {
+ 		struct page *page = pfn_to_page(pfn + i);
+ 
++		if (private_slot)
++			kvm_private_mem_clear_page_flags(page);
+ 		put_page(page);
+ 		WARN_ON(!page_count(page) && to_kvm_tdx(kvm)->hkid > 0);
+ 	}
+-	if (kvm_slot_can_be_private(slot)) {
++	if (private_slot) {
+ 		/* Private slot case */
+ 		return;
+ 	}

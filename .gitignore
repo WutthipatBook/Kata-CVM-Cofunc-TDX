@@ -1,0 +1,8 @@
+/backups/
+/logs/
+/last_*.log
+**/__pycache__/
+*.py[cod]
+*.orig
+*.rej
+*~

@@ -1,0 +1,304 @@
+From e7256ad9b5f97a12dc6645b84416d6385e6a0894 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 29 Jun 2026 08:45:00 +0000
+Subject: [PATCH] runtime: emit grant/accept instrumentation metrics
+
+Add temporary instrumentation for the old-ABI TDX path:
+
+- shadow runtime prints host-side grant_mem timing around mmap, madvise, and
+  KVM_SET_USER_MEMORY_REGION;
+- Python/JS templates print guest accept count and page-fault timing deltas;
+- analyze.py preserves sc_* instrumentation lines and new guest counters in the
+  per-run JSON.
+---
+ shadow_container/main.c     | 45 +++++++++++++++++++++++++++++++++++--
+ testcases/tools/analyze.py  | 23 +++++++++++++++++--
+ testcases/tools/template.js | 18 +++++++++++++++
+ testcases/tools/template.py | 18 +++++++++++++++
+ 4 files changed, 99 insertions(+), 5 deletions(-)
+
+--- a/shadow_container/main.c
++++ b/shadow_container/main.c
+@@ -65,6 +65,13 @@ static char **argv;
+ static const char *mem_file = NULL;
+ static int enable_sync = 1;
+ static unsigned vm_slot_id = 0;
++/* CoFunc grant/accept stat instrumentation. */
++static unsigned long sc_host_grant_total_ns;
++static unsigned long sc_host_mmap_anon_ns;
++static unsigned long sc_host_madvise_ns;
++static unsigned long sc_host_mmap_file_ns;
++static unsigned long sc_host_set_user_memory_region_ns;
++static unsigned long sc_host_grant_calls;
+ 
+ static int finish = 0;
+ 
+@@ -87,6 +94,14 @@ static double get_time(void)
+         return tp.tv_sec + tp.tv_nsec / 1000000000.0;
+ }
+ 
++static unsigned long get_time_ns(void)
++{
++        struct timespec tp;
++
++        clock_gettime(CLOCK_MONOTONIC, &tp);
++        return tp.tv_sec * 1000000000UL + tp.tv_nsec;
++}
++
+ static void print_time(const char *str)
+ { 
+         printf("%s %f\n", str, get_time());
+@@ -148,6 +163,7 @@ static void grant_mem(void)
+ {
+         int ret;
++        unsigned long t_grant_begin, t0, t1;
+ #if defined(CONFIG_PLAT_INTEL_TDX)
+         struct kvm_userspace_memory_region mem;
+ #elif defined(CONFIG_PLAT_AMD_SEV)
+         struct kvm_userspace_memory_region2 mem;
+@@ -155,38 +171,49 @@ static void grant_mem(void)
+ #endif
+         
+         debug("[SC-H] grant_mem: slot=%u, GPA=0x%lx\n", slot, gpa);
++        t_grant_begin = get_time_ns();
++        sc_host_grant_calls++;
+ 
+ #ifndef CONFIG_PLAT_AMD_SEV
+         if (!mem_file) {
+ #endif
++                t0 = get_time_ns();
+                 anon = mmap(0, mem_size + HPAGE_SIZE, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++                t1 = get_time_ns();
++                sc_host_mmap_anon_ns += t1 - t0;
+                 if (anon == MAP_FAILED) {
+                         perror("mmap anon");
+                         exit(EXIT_FAILURE);
+                 }
+ 
++                t0 = get_time_ns();
+                 ret = madvise(anon, mem_size + HPAGE_SIZE, MADV_HUGEPAGE);
++                t1 = get_time_ns();
++                sc_host_madvise_ns += t1 - t0;
+                 if (ret < 0) {
+                         perror("madvise");
+                         exit(EXIT_FAILURE);
+                 }
+ #ifndef CONFIG_PLAT_AMD_SEV
+         } else {
+                 int fd;
+                 
+                 fd = open(mem_file, O_RDWR);
+                 if (fd < 0) {
+                         printf("%s\n", mem_file);
+                         perror("open mem file");
+                         exit(EXIT_FAILURE);
+                 }
+-                
++
++                t0 = get_time_ns();
+                 anon = mmap(0, mem_size, PROT_READ | PROT_WRITE,
+                             MAP_SHARED | MAP_POPULATE, fd, 0);
++                t1 = get_time_ns();
++                sc_host_mmap_file_ns += t1 - t0;
+                 if (anon == MAP_FAILED) {
+                         perror("mmap mem file");
+                         exit(EXIT_FAILURE);
+                 }
+         }
+ #endif
+@@ -211,16 +237,34 @@ static void grant_mem(void)
+         mem.restrictedmem_offset = 0;
+ #endif
+ 
++        t0 = get_time_ns();
+ #if defined(CONFIG_PLAT_INTEL_TDX)
+         ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION, &mem);
+ #elif defined(CONFIG_PLAT_AMD_SEV)
+         ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION2, &mem);
+ #endif
++        t1 = get_time_ns();
++        sc_host_set_user_memory_region_ns += t1 - t0;
+ 
+         if (ret < 0) {
+                 perror("grant memory");
+                 exit(EXIT_FAILURE);
+         }
+ 
+         debug("[SC-H] grant_mem: HVA=%p\n", anon);
++        sc_host_grant_total_ns += get_time_ns() - t_grant_begin;
++        if (!getenv("SILENT")) {
++                printf("sc_host_grant_calls %lu\n", sc_host_grant_calls);
++                printf("sc_host_mem_size %lu\n", mem_size);
++                printf("sc_host_small_shared_pool %d\n", small_shared_pool);
++                printf("sc_host_slot %u\n", slot);
++                printf("sc_host_gpa %lu\n", gpa);
++                printf("sc_host_grant_total_ns %lu\n", sc_host_grant_total_ns);
++                printf("sc_host_mmap_anon_ns %lu\n", sc_host_mmap_anon_ns);
++                printf("sc_host_madvise_ns %lu\n", sc_host_madvise_ns);
++                printf("sc_host_mmap_file_ns %lu\n", sc_host_mmap_file_ns);
++                printf("sc_host_set_user_memory_region_ns %lu\n",
++                       sc_host_set_user_memory_region_ns);
++                fflush(stdout);
++        }
+ }
+ 
+ static void remove_mem(void)
+--- a/testcases/tools/analyze.py
++++ b/testcases/tools/analyze.py
+@@ -23,6 +23,13 @@ with open("exec_log", "r") as log_file:
+             data[tag] = int(val)
+         elif line.startswith("mode"):
+             mode = line.strip().split()[1]
++        elif line.startswith("sc_"):
++            parts = line[:-1].split()
++            if len(parts) == 2:
++                tag, val = parts
++                val = float(val)
++                data[tag] = data.get(tag, 0.0) + val
++
+ 
+ 
+ def report(result, log_filename):
+@@ -35,6 +42,14 @@ def report(result, log_filename):
+     print(json.dumps(result, indent=4))
+ 
+ 
++def add_instrumentation_metrics():
++    for key, val in data.items():
++        if key.startswith("sc_"):
++            result[key] = val
++            if key.endswith("_ns"):
++                result[f"{key[:-3]}_s"] = val / 10 ** 9
++
++
+ result = {"timestamp": time.time()}
+ 
+ def handle_others():
+@@ -97,10 +112,13 @@ def handle_lean_sc_fork():
+     result["t_boot_func"] = data["t_import_done"] - data["t_sc_init"]
+     result["t_exec"] = data["t_func_done"] - data["t_import_done"]
+     result["t_e2e"] = data["t_func_done"] - data["t_launch_begin"]
+-    for key in ["n_hcalls_exec", "n_cow"]:
+-        result[key] = data[key]
+-    for key in ["t_encrypt_exec", "t_grant_exec", "t_delegate_exec", "t_attest_import", "t_grant_import", "t_delegate_import"]:
++    for key in ["n_hcalls_exec", "n_cow", "n_accept_exec", "n_accept_import"]:
++        if key in data:
++            result[key] = data[key]
++    for key in ["t_encrypt_exec", "t_grant_exec", "t_delegate_exec", "t_attest_import", "t_grant_import", "t_delegate_import", "t_pgfault_exec", "t_pgfault_import"]:
+-        result[key] = data[key] / 10 ** 9
++        if key in data:
++            result[key] = data[key] / 10 ** 9
++    add_instrumentation_metrics()
+ 
+ 
+ def handle_lean_sc_launch():
+@@ -108,9 +125,12 @@ def handle_lean_sc_launch():
+     result["t_exec"] = data["t_func_done"] - data["t_import_done"]
+     result["t_e2e"] = data["t_func_done"] - data["t_launch_begin"]
+-    for key in ["n_hcalls_exec", "n_cow"]:
+-        result[key] = data[key]
+-    for key in ["t_encrypt_exec", "t_grant_exec", "t_delegate_exec", "t_attest_import", "t_grant_import", "t_delegate_import"]:
++    for key in ["n_hcalls_exec", "n_cow", "n_accept_exec", "n_accept_import"]:
++        if key in data:
++            result[key] = data[key]
++    for key in ["t_encrypt_exec", "t_grant_exec", "t_delegate_exec", "t_attest_import", "t_grant_import", "t_delegate_import", "t_pgfault_exec", "t_pgfault_import"]:
+-        result[key] = data[key] / 10 ** 9
++        if key in data:
++            result[key] = data[key] / 10 ** 9
++    add_instrumentation_metrics()
+ 
+ 
+ def handle_kata_launch():
+--- a/testcases/tools/template.js
++++ b/testcases/tools/template.js
+@@ -32,11 +32,16 @@ if (process.argv[2] == '--sc-snapshot') {
+ 
+ fn_code = __fs.readFileSync('/func/execute.js') + '';
+ 
++const STAT_N_ACCEPT = 0x7;
++const STAT_T_PGFAULT = 0x8;
++
+ t_attest_after_import = sc.stat_get_stat(0x3);
+ t_import_done = Date.now() / 1000;
+ 
+ n_hcalls_before_exec = sc.stat_get_stat(0x1);
+ t_encrypt_before_exec = sc.stat_get_stat(0x4);
+ t_grant_before_exec = sc.stat_get_stat(0x5);
+ t_delegate_before_exec = sc.stat_get_stat(0x6);
++n_accept_before_exec = sc.stat_get_stat(STAT_N_ACCEPT);
++t_pgfault_before_exec = sc.stat_get_stat(STAT_T_PGFAULT);
+ eval(fn_code);
+@@ -56,6 +61,8 @@ SendRequest('http://127.0.0.1:8888/get_param', {
+       t_grant_after_exec = sc.stat_get_stat(0x5);
+       t_delegate_after_exec = sc.stat_get_stat(0x6);
+       n_cow = sc.stat_get_stat(0x2);
++      n_accept_after_exec = sc.stat_get_stat(STAT_N_ACCEPT);
++      t_pgfault_after_exec = sc.stat_get_stat(STAT_T_PGFAULT);
+       t_func_done = Date.now() / 1000;
+       console.log(`t_import_done ${t_import_done}`);
+       console.log(`t_func_done ${t_func_done}`);
+@@ -68,6 +75,18 @@ SendRequest('http://127.0.0.1:8888/get_param', {
+             console.log(`t_grant_import ${t_grant_before_exec}`);
+             console.log(`t_delegate_import ${t_delegate_before_exec}`);
+             console.log(`n_cow ${n_cow}`);
++            console.log(`sc_guest_n_accept_before ${n_accept_before_exec}`);
++            console.log(`sc_guest_n_accept_after ${n_accept_after_exec}`);
++            console.log(`sc_guest_t_pgfault_before ${t_pgfault_before_exec}`);
++            console.log(`sc_guest_t_pgfault_after ${t_pgfault_after_exec}`);
++            if (n_accept_before_exec >= 0) {
++                  console.log(`n_accept_exec ${n_accept_after_exec - n_accept_before_exec}`);
++                  console.log(`n_accept_import ${n_accept_before_exec}`);
++            }
++            if (t_pgfault_before_exec >= 0) {
++                  console.log(`t_pgfault_exec ${t_pgfault_after_exec - t_pgfault_before_exec}`);
++                  console.log(`t_pgfault_import ${t_pgfault_before_exec}`);
++            }
+       }
+     })
+   })  
+--- a/testcases/tools/template.py
++++ b/testcases/tools/template.py
+@@ -14,6 +14,8 @@ STAT_T_ATTEST   = 0x3
+ STAT_T_ENCRYPT  = 0x4
+ STAT_T_GRANT    = 0x5
+ STAT_T_DELEGATE = 0x6
++STAT_N_ACCEPT   = 0x7
++STAT_T_PGFAULT  = 0x8
+ 
+ 
+ def get_param(fn_name):
+@@ -83,6 +85,8 @@ n_hcalls_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_N_HCALLS)
+ t_encrypt_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_ENCRYPT)
+ t_grant_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_GRANT)
+ t_delegate_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_DELEGATE)
++n_accept_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_N_ACCEPT)
++t_pgfault_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_PGFAULT)
+ exec(fn_code)
+ param = get_param(fn_name)
+ retval = handler(param)
+@@ -92,6 +96,8 @@ t_encrypt_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_ENCRYPT)
+ t_grant_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_GRANT)
+ t_delegate_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_DELEGATE)
+ n_cow = libc.syscall(SYS_SC_GET_STAT, STAT_N_COWS)
++n_accept_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_N_ACCEPT)
++t_pgfault_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_PGFAULT)
+ # libc.syscall(SYS_SC_DEFER_ENCRYPT, 0)
+ 
+ t_func_done = time.time()
+@@ -111,3 +117,13 @@ if n_hcalls_before_exec >= 0:
+     print(f"t_grant_import {t_grant_before_exec}")
+     print(f"t_delegate_import {t_delegate_before_exec}")
+     print(f"n_cow {n_cow}")
++    print(f"sc_guest_n_accept_before {n_accept_before_exec}")
++    print(f"sc_guest_n_accept_after {n_accept_after_exec}")
++    print(f"sc_guest_t_pgfault_before {t_pgfault_before_exec}")
++    print(f"sc_guest_t_pgfault_after {t_pgfault_after_exec}")
++    if n_accept_before_exec >= 0:
++        print(f"n_accept_exec {n_accept_after_exec - n_accept_before_exec}")
++        print(f"n_accept_import {n_accept_before_exec}")
++    if t_pgfault_before_exec >= 0:
++        print(f"t_pgfault_exec {t_pgfault_after_exec - t_pgfault_before_exec}")
++        print(f"t_pgfault_import {t_pgfault_before_exec}")
+-- 
+2.43.0

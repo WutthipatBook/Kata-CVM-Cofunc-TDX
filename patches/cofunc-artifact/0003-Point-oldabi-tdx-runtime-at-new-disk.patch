@@ -1,0 +1,33 @@
+diff --git a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/CMakeLists.txt b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/CMakeLists.txt
+index 4b4a5cb..f2cf368 100644
+--- a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/CMakeLists.txt
++++ b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/CMakeLists.txt
+@@ -30,10 +30,10 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/chcore.iso
+ # Paths are intentionally overridable because this artifact is migrated between
+ # local and server hosts.
+ set(COFUNC_TDX_QEMU
+-    "\${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}"
++    "\${COFUNC_TDX_QEMU:-/mnt/new_disk/cofunc_tdx_artifact/install/qemu-tdx-2022-09-01-cofunc/bin/qemu-system-x86_64}"
+ )
+ set(COFUNC_TDX_OVMF
+-    "\${COFUNC_TDX_OVMF:-/mnt/nvme_500g/cofunc_tdx_artifact/firmware/ovmf-inteltdx_2025.02-8ubuntu3.1/usr/share/ovmf/OVMF.inteltdx.fd}"
++    "\${COFUNC_TDX_OVMF:-/mnt/new_disk/cofunc_tdx_artifact/firmware/ovmf-inteltdx_2025.02-8ubuntu3.1/usr/share/ovmf/OVMF.inteltdx.fd}"
+ )
+ set(COFUNC_TDX_QEMU_BIOS_DIR "\${COFUNC_TDX_QEMU_BIOS_DIR:-/usr/share/qemu}")
+ set(COFUNC_TDX_SMP "\${COFUNC_TDX_SMP:-32}")
+diff --git a/testcases/tools/cvm.sh b/testcases/tools/cvm.sh
+index 6a83dc9..128bf3f 100755
+--- a/testcases/tools/cvm.sh
++++ b/testcases/tools/cvm.sh
+@@ -56,9 +56,9 @@ touch "$exec_log"
+         printf 'boot_timeout=%s\n' "$boot_timeout"
+         printf 'max_vcpus=%s\n' "$max_vcpus"
+         printf 'tdx_smp=%s\n' "$tdx_smp"
+-        printf 'qemu=%s\n' "${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}"
++        printf 'qemu=%s\n' "${COFUNC_TDX_QEMU:-/mnt/new_disk/cofunc_tdx_artifact/install/qemu-tdx-2022-09-01-cofunc/bin/qemu-system-x86_64}"
+         uname -a
+-        "${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}" --version 2>&1 | head -5 || true
++        "${COFUNC_TDX_QEMU:-/mnt/new_disk/cofunc_tdx_artifact/install/qemu-tdx-2022-09-01-cofunc/bin/qemu-system-x86_64}" --version 2>&1 | head -5 || true
+         cp -a build/simulate.sh "$trace_dir/simulate.sh" 2>/dev/null || true
+ } >"$trace_dir/launch-env.log" 2>&1 || true
+ 

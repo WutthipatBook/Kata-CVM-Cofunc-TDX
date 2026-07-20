@@ -1,0 +1,51 @@
+From 1a94b6b3db663f3cfb4d33d6f2a9d0e7b239b014 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 6 Jul 2026 14:20:00 +0000
+Subject: [PATCH] KVM: Diagnostic clear TDX unpin page flags
+
+The old-ABI CoFunc TDX path maps private TD pages through normal KVM
+memslots.  The initial KVM clean PFN release can mark the page referenced
+while the TD's SEPT mapping keeps an extra page reference alive.  When
+tdx_unpin() later drops that final TDX pin, hugetlb/buddy preparation can see
+PG_referenced or PG_dirty still set and report PAGE_FLAGS_CHECK_AT_PREP.
+
+Clear those two accounting flags immediately before dropping the TDX SEPT pin.
+This intentionally targets the final TDX-private page lifetime edge rather than
+the normal KVM release helpers or CONFIG_HAVE_KVM_PRIVATE_MEM path, so it also
+covers old-ABI private faults in non-private memslots.
+---
+ arch/x86/kvm/vmx/tdx.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -1852,6 +1852,19 @@ void tdx_load_mmu_pgd(struct kvm_vcpu *vcpu, hpa_t root_hpa, int pgd_level)
+ 	td_vmcs_write64(to_tdx(vcpu), SHARED_EPT_POINTER, root_hpa & PAGE_MASK);
+ }
+ 
++static void cofunc_tdx_clear_unpin_page_flags(struct page *page)
++{
++	/*
++	 * CoFunc old-ABI TDX unpin page-flag cleanup diagnostic.
++	 *
++	 * Old-ABI private TD pages can be backed by normal memslots.  KVM's
++	 * clean PFN release may leave PG_referenced set while the SEPT pin keeps
++	 * the page alive; tdx_unpin() can then be the final put_page().
++	 */
++	ClearPageReferenced(page);
++	ClearPageDirty(page);
++}
++
+ static void tdx_measure_page(struct kvm_tdx *kvm_tdx, hpa_t gpa, int size)
+ {
+ 	struct tdx_module_output out;
+@@ -1880,6 +1894,7 @@ static void tdx_unpin(struct kvm *kvm, gfn_t gfn, kvm_pfn_t pfn,
+ 	for (i = 0; i < KVM_PAGES_PER_HPAGE(level); i++) {
+ 		struct page *page = pfn_to_page(pfn + i);
+ 
++		cofunc_tdx_clear_unpin_page_flags(page);
+ 		put_page(page);
+ 		WARN_ON(!page_count(page) && to_kvm_tdx(kvm)->hkid > 0);
+ 	}
+-- 
+2.43.0

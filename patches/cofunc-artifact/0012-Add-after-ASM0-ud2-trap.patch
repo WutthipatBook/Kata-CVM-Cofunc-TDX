@@ -1,0 +1,11 @@
+--- a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
++++ b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
+@@ -105,6 +105,8 @@ EXPORT(_start)
+ 	TDX_BOOT_PUTC 10
+ 	popq %rsi
+ 	popq %rdi
++cofunc_after_asm0_ud2:
++	ud2
+ 
+ 	/* zero bss */
+ 	movl %edi, %edx

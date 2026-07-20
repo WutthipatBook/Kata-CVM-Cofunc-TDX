@@ -1,0 +1,16 @@
+diff --git a/cvm_os/kernel/split-container/split_container.c b/cvm_os/kernel/split-container/split_container.c
+index 641d7c4..55f093f 100644
+--- a/cvm_os/kernel/split-container/split_container.c
++++ b/cvm_os/kernel/split-container/split_container.c
+@@ -254,11 +254,8 @@ extern struct page *__buddy_get_pages(struct phys_mem_pool *, int order);
+ extern void __buddy_free_pages(struct phys_mem_pool *, struct page *page);
+ 
+-#ifdef CHCORE_SPLIT_CONTAINER_HPAGE
+-#define ACCEPT_PAGE_SIZE HPAGE_SIZE
+-#else /* CHCORE_SPLIT_CONTAINER_HPAGE */
++/* CoFunc diag: force 4K split-container accept; bypass rejected 2M accepts. */
+ #define ACCEPT_PAGE_SIZE PAGE_SIZE
+-#endif /* CHCORE_SPLIT_CONTAINER_HPAGE */
+ void *split_container_get_pages(int order, int enc)
+ {
+         struct page *page, *hpage;

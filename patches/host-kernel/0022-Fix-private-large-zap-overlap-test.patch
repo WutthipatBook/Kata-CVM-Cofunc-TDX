@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000022 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Tue, 7 Jul 2026 17:05:00 +0000
+Subject: [PATCH] Fix private large zap overlap test
+
+When zapping private TDP leafs, the large-SPTE split decision used
+(gfn & mask) when checking whether the zap range partially covered the
+large mapping.  That value is the offset within the large page, not the
+large page base GFN.
+
+For non-zero memslot ranges this made full-range zaps look partial and
+forced promoted old-ABI private 2M SPTEs through the live split/demote
+path during memslot teardown.  The subsequent teardown can then walk
+4K software children while the Secure EPT still reports the 2M parent as
+blocked.
+
+Compare the aliased large-page base against the aliased zap range, and
+use the unaliased GFN only for memslot/memory-attribute lookup.
+
+Also drop the very broad changed-entry SEPT diagnostic, which exhausts
+the log budget before teardown/split events are reached.
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 11 +++++++----
+ arch/x86/kvm/vmx/tdx.c     |  2 --
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/arch/x86/kvm/mmu/tdp_mmu.c b/arch/x86/kvm/mmu/tdp_mmu.c
+index ac05f943c..0e5df4053 100644
+--- a/arch/x86/kvm/mmu/tdp_mmu.c
++++ b/arch/x86/kvm/mmu/tdp_mmu.c
+@@ -1269,15 +1269,17 @@ static bool tdp_mmu_zap_leafs(struct kvm *kvm, struct kvm_mmu_page *root,
+ 
+ 		if (is_private && kvm_gfn_shared_mask(kvm) &&
+ 		    is_large_pte(iter.old_spte)) {
+-			gfn_t gfn = iter.gfn & ~kvm_gfn_shared_mask(kvm);
++			gfn_t slot_gfn = iter.gfn & ~kvm_gfn_shared_mask(kvm);
+ 			gfn_t mask = KVM_PAGES_PER_HPAGE(iter.level) - 1;
++			gfn_t base = iter.gfn & ~mask;
++			gfn_t limit = base + KVM_PAGES_PER_HPAGE(iter.level);
+ 			struct kvm_memory_slot *slot;
+ 			struct kvm_mmu_page *sp;
+ 
+-			slot = gfn_to_memslot(kvm, gfn);
+-			if (kvm_mem_attr_is_mixed(slot, gfn, iter.level) ||
+-			    (gfn & mask) < start ||
+-			    end < (gfn & mask) + KVM_PAGES_PER_HPAGE(iter.level)) {
++			slot = gfn_to_memslot(kvm, slot_gfn);
++			if (kvm_mem_attr_is_mixed(slot, slot_gfn, iter.level) ||
++			    base < start ||
++			    end < limit) {
+ 				sp = tdp_mmu_alloc_sp_for_split(kvm, &iter, false);
+ 				WARN_ON(!sp);
+ 
+diff --git a/arch/x86/kvm/vmx/tdx.c b/arch/x86/kvm/vmx/tdx.c
+index 214fed001..3ee66f39b 100644
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -2423,8 +2423,6 @@ static void tdx_handle_changed_private_spte(
+ 	WARN_ON(!is_td(kvm));
+ 	lockdep_assert_held(&kvm->mmu_lock);
+ 
+-	cofunc_tdx_log_sept_change(kvm, "changed-entry", change);
+-
+ 	if (change->new.is_present) {
+ 		if (level > PG_LEVEL_4K && was_leaf && !is_leaf) {
+ 			cofunc_tdx_log_sept_change(kvm, "changed-live-split", change);
+-- 
+2.43.0

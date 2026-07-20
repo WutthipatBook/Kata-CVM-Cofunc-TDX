@@ -1,0 +1,189 @@
+From 00d39c04a67117e1fb4e12f80d8068320ea7951f Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Wed, 1 Jul 2026 06:40:00 +0000
+Subject: [PATCH] KVM: Diagnostic log high-GFN private TDP levels
+
+The first private-level diagnostic logged TDX SEPT additions too early in TD
+boot and did not hit the TDP MMU path used by this run. The rejected 2MB accept
+GPAs are high, e.g. 0x683000000, so filter the host-side logging to high GFNs
+and instrument the actual TDP mapping path.
+
+This diagnostic logs:
+
+  * private memfile PFN order from kvm_faultin_pfn_private()
+  * TDP post-hugepage-adjust levels
+  * TDP final target level before installing the SPTE
+
+It avoids the TDX set_private_spte hook so early TD setup should not consume the
+budget or perturb the SEAMCALL path.
+
+diff -uNr base/arch/x86/kvm/mmu/mmu.c mod/arch/x86/kvm/mmu/mmu.c
+--- base/arch/x86/kvm/mmu/mmu.c	2026-07-01 06:31:58.335473264 +0000
++++ mod/arch/x86/kvm/mmu/mmu.c	2026-07-01 06:32:17.939314066 +0000
+@@ -27,6 +27,7 @@
+ #include "spte.h"
+ 
+ #include <linux/kvm_host.h>
++#include <linux/atomic.h>
+ #include <linux/types.h>
+ #include <linux/string.h>
+ #include <linux/mm.h>
+@@ -4558,6 +4559,36 @@
+ 	return level;
+ }
+ 
++/*
++ * CoFunc old-ABI private MMU level diagnostic: only log high GFNs, matching
++ * split-container runtime grant GPAs such as 0x683000000.
++ */
++#define COFUNC_TDX_DIAG_MIN_GFN	0x100000ULL
++static atomic_t cofunc_tdx_private_pfn_log_budget = ATOMIC_INIT(256);
++
++static bool cofunc_tdx_mmu_diag_should_log(gfn_t gfn, atomic_t *budget)
++{
++	return gfn >= COFUNC_TDX_DIAG_MIN_GFN &&
++	       atomic_dec_if_positive(budget) >= 0;
++}
++
++static int cofunc_tdx_mmu_gfn_2m_aligned(gfn_t gfn)
++{
++	return !(gfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1));
++}
++
++static int cofunc_tdx_mmu_pfn_2m_aligned(kvm_pfn_t pfn)
++{
++	return !(pfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1));
++}
++
++static unsigned long cofunc_tdx_mmu_pages_for_level(enum pg_level level)
++{
++	if (level < PG_LEVEL_4K || level > KVM_MAX_HUGEPAGE_LEVEL)
++		return 0;
++	return KVM_PAGES_PER_HPAGE(level);
++}
++
+ static void kvm_exit_memory_fault(struct kvm_vcpu *vcpu,
+ 				  struct kvm_page_fault *fault)
+ {
+@@ -4576,6 +4607,7 @@
+ {
+ 	int order;
+ 	struct kvm_memory_slot *slot = fault->slot;
++	u8 level;
+ 	bool private_exist = kvm_mem_is_private(vcpu->kvm, fault->gfn);
+ 
+ 	/*
+@@ -4590,9 +4622,20 @@
+ 	if (fault->is_private) {
+ 		if (kvm_private_mem_get_pfn(slot, fault->gfn, &fault->pfn, &order))
+ 			return RET_PF_RETRY;
+-		fault->max_level = min(order_to_level(order), fault->max_level);
++		level = order_to_level(order);
++		fault->max_level = min(level, fault->max_level);
+ 		fault->map_writable = !(slot->flags & KVM_MEM_READONLY);
+-		fault->host_level = order_to_level(order);
++		fault->host_level = level;
++		if (cofunc_tdx_mmu_diag_should_log(fault->gfn,
++						   &cofunc_tdx_private_pfn_log_budget))
++			pr_info("CoFunc old-ABI private MMU level diagnostic: private_pfn gfn=0x%llx pfn=0x%llx order=%d host_level=%u max_level=%u pages=%lu gfn_2m_aligned=%d pfn_2m_aligned=%d private_exist=%d\n",
++				(unsigned long long)fault->gfn,
++				(unsigned long long)fault->pfn, order,
++				fault->host_level, fault->max_level,
++				cofunc_tdx_mmu_pages_for_level(fault->host_level),
++				cofunc_tdx_mmu_gfn_2m_aligned(fault->gfn),
++				cofunc_tdx_mmu_pfn_2m_aligned(fault->pfn),
++				private_exist);
+ 		return RET_PF_FIXED;
+ 	}
+ 
+diff -uNr base/arch/x86/kvm/mmu/tdp_mmu.c mod/arch/x86/kvm/mmu/tdp_mmu.c
+--- base/arch/x86/kvm/mmu/tdp_mmu.c	2026-07-01 06:31:58.341473216 +0000
++++ mod/arch/x86/kvm/mmu/tdp_mmu.c	2026-07-01 06:32:42.471114850 +0000
+@@ -7,12 +7,44 @@
+ #include "tdp_mmu.h"
+ #include "spte.h"
+ 
++#include <linux/atomic.h>
+ #include <asm/cmpxchg.h>
+ #include <trace/events/kvm.h>
+ 
+ static bool __read_mostly tdp_mmu_enabled = true;
+ module_param_named(tdp_mmu, tdp_mmu_enabled, bool, 0644);
+ 
++/*
++ * CoFunc old-ABI private TDP level diagnostic: log high GFNs only, so boot
++ * mappings do not consume the budget before runtime split-container grants.
++ */
++#define COFUNC_TDX_TDP_DIAG_MIN_GFN	0x100000ULL
++static atomic_t cofunc_tdx_tdp_adjust_log_budget = ATOMIC_INIT(256);
++static atomic_t cofunc_tdx_tdp_target_log_budget = ATOMIC_INIT(256);
++
++static bool cofunc_tdx_tdp_diag_should_log(gfn_t gfn, atomic_t *budget)
++{
++	return gfn >= COFUNC_TDX_TDP_DIAG_MIN_GFN &&
++	       atomic_dec_if_positive(budget) >= 0;
++}
++
++static int cofunc_tdx_tdp_gfn_2m_aligned(gfn_t gfn)
++{
++	return !(gfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1));
++}
++
++static int cofunc_tdx_tdp_pfn_2m_aligned(kvm_pfn_t pfn)
++{
++	return !(pfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1));
++}
++
++static unsigned long cofunc_tdx_tdp_pages_for_level(enum pg_level level)
++{
++	if (level < PG_LEVEL_4K || level > KVM_MAX_HUGEPAGE_LEVEL)
++		return 0;
++	return KVM_PAGES_PER_HPAGE(level);
++}
++
+ /* Initializes the TDP MMU for the VM, if enabled. */
+ int kvm_mmu_init_tdp_mmu(struct kvm *kvm)
+ {
+@@ -1441,6 +1473,18 @@
+ 	int ret;
+ 
+ 	kvm_mmu_hugepage_adjust(vcpu, fault);
++	if (is_private &&
++	    cofunc_tdx_tdp_diag_should_log(fault->gfn,
++					   &cofunc_tdx_tdp_adjust_log_budget))
++		pr_info("CoFunc old-ABI private TDP level diagnostic: tdp_adjust gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u host_pages=%lu disallowed=%d gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++			(unsigned long long)fault->gfn,
++			(unsigned long long)fault->pfn,
++			fault->max_level, fault->req_level, fault->goal_level,
++			fault->host_level,
++			cofunc_tdx_tdp_pages_for_level(fault->host_level),
++			fault->huge_page_disallowed,
++			cofunc_tdx_tdp_gfn_2m_aligned(fault->gfn),
++			cofunc_tdx_tdp_pfn_2m_aligned(fault->pfn));
+ 
+ 	trace_kvm_mmu_spte_requested(fault);
+ 
+@@ -1530,6 +1574,23 @@
+ 		return RET_PF_RETRY;
+ 	}
+ 
++	if (is_private &&
++	    cofunc_tdx_tdp_diag_should_log(fault->gfn,
++					   &cofunc_tdx_tdp_target_log_budget))
++		pr_info("CoFunc old-ABI private TDP level diagnostic: tdp_target fault_gfn=0x%llx iter_gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u iter_level=%d iter_pages=%lu old_present=%d old_large=%d old_private_zapped=%d fault_gfn_2m_aligned=%d iter_gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++			(unsigned long long)fault->gfn,
++			(unsigned long long)iter.gfn,
++			(unsigned long long)fault->pfn,
++			fault->max_level, fault->req_level, fault->goal_level,
++			fault->host_level, iter.level,
++			cofunc_tdx_tdp_pages_for_level(iter.level),
++			is_shadow_present_pte(iter.old_spte),
++			is_large_pte(iter.old_spte),
++			is_private_zapped_spte(iter.old_spte),
++			cofunc_tdx_tdp_gfn_2m_aligned(fault->gfn),
++			cofunc_tdx_tdp_gfn_2m_aligned(iter.gfn),
++			cofunc_tdx_tdp_pfn_2m_aligned(fault->pfn));
++
+ 	ret = tdp_mmu_map_handle_target_level(vcpu, fault, &iter);
+ 	rcu_read_unlock();
+ 

@@ -1,0 +1,1043 @@
+From 826514931fa081f4dbd0e7b0a0fc7d9d132158bd Mon Sep 17 00:00:00 2001
+From: JaehyeonLee <ljhhasang@gmail.com>
+Date: Wed, 10 Jun 2026 07:31:05 +0000
+Subject: [PATCH] Enable CoFunc TDX split-container execution
+
+---
+ cvm_os/.config                                |   2 +-
+ cvm_os/chbuild                                |   8 +-
+ cvm_os/download_musl.sh                       |  10 +-
+ .../arch/x86_64/boot/intel_tdx/CMakeLists.txt |  24 ++-
+ .../arch/x86_64/boot/intel_tdx/init/header.S  |   1 -
+ cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c |   5 +
+ cvm_os/kernel/arch/x86_64/irq/irq_entry.c     |  13 ++
+ cvm_os/kernel/arch/x86_64/machine/cpu.c       |  10 +-
+ cvm_os/kernel/arch/x86_64/machine/smp.c       |   8 +-
+ cvm_os/kernel/arch/x86_64/main.c              |   1 -
+ .../kernel/arch/x86_64/plat/intel_tdx/tdx.c   |   5 +-
+ .../include/arch/x86_64/arch/drivers/acpi.h   |   3 +-
+ .../arch/x86_64/plat/intel_tdx/machine.h      |   2 +-
+ .../kernel/split-container/split_container.c  |   2 +-
+ cvm_os/scripts/qemu/emulate.tpl.sh            |  22 ++-
+ shadow_container/Dockerfile                   |   7 +-
+ shadow_container/build.sh                     |   2 +-
+ shadow_container/config.h                     |   2 +
+ shadow_container/main.c                       | 186 ++++++++++++++++--
+ shadow_container/split_container.h            |  70 ++++++-
+ testcases/tools/cvm.sh                        |  78 +++++++-
+ testcases/tools/sc-snapshot.sh                |   3 +
+ testcases/tools/start.sh                      |   7 +-
+ testcases/tools/tasks/clean/action.sh         |   2 +-
+ testcases/tools/tasks/run_sc_fork/action.sh   |  20 +-
+ 25 files changed, 425 insertions(+), 68 deletions(-)
+
+diff --git a/cvm_os/.config b/cvm_os/.config
+index 71e3f62..7a82fc9 100644
+--- a/cvm_os/.config
++++ b/cvm_os/.config
+@@ -1,5 +1,5 @@
+ CHCORE_CROSS_COMPILE:STRING=
+-CHCORE_PLAT:STRING=amd_sev
++CHCORE_PLAT:STRING=intel_tdx
+ CHCORE_SUBPLAT:STRING=
+ CHCORE_CHPM_INSTALL_PREFIX:PATH=.chpm/install
+ CHCORE_CHPM_INSTALL_TO_RAMDISK:BOOL=OFF
+diff --git a/cvm_os/chbuild b/cvm_os/chbuild
+index 437cb59..9ef93a8 100755
+--- a/cvm_os/chbuild
++++ b/cvm_os/chbuild
+@@ -279,7 +279,13 @@ _docker_run() {
+             --privileged \
+             -v $(pwd):$(pwd) -w $(pwd) \
+             billsjcdocker/chcore_builder:v1.8.3-cvm \
+-            $self $@
++            bash -lc '
++                if ! command -v mformat >/dev/null 2>&1; then
++                    apt-get update
++                    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends mtools
++                fi
++                exec "$@"
++            ' _ $self $@
+     fi
+ }
+ 
+diff --git a/cvm_os/download_musl.sh b/cvm_os/download_musl.sh
+index 472f226..59cb412 100755
+--- a/cvm_os/download_musl.sh
++++ b/cvm_os/download_musl.sh
+@@ -1,8 +1,12 @@
+ #!/bin/bash -e
+ 
+ path=user/system-services/chcore-libc/musl-libc
+-url=git://git.musl-libc.org/musl
++url=https://git.musl-libc.org/git/musl
+ branch=v1.2.3
+ 
+-sudo rm -rf $path
+-git clone --depth=1 -b $branch $url $path
++if [[ -e "$path" ]]; then
++        echo "$path already exists"
++        exit 0
++fi
++
++git clone --depth=1 -b "$branch" "$url" "$path"
+diff --git a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/CMakeLists.txt b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/CMakeLists.txt
+index 9554853..2d30eac 100644
+--- a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/CMakeLists.txt
++++ b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/CMakeLists.txt
+@@ -26,15 +26,29 @@ add_custom_target(
+ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/chcore.iso
+         DESTINATION ${CMAKE_INSTALL_PREFIX})
+ 
+-# Note: `$basedir` is a shell variable in `emulate.tpl.sh`
++# Note: `$basedir` is a shell variable in `emulate.tpl.sh`.
++# Paths are intentionally overridable because this artifact is migrated between
++# local and server hosts.
++set(COFUNC_TDX_QEMU
++    "\${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}"
++)
++set(COFUNC_TDX_OVMF
++    "\${COFUNC_TDX_OVMF:-/mnt/nvme_500g/cofunc_tdx_artifact/firmware/ovmf-inteltdx_2025.02-8ubuntu3.1/usr/share/ovmf/OVMF.inteltdx.fd}"
++)
++set(COFUNC_TDX_QEMU_BIOS_DIR "\${COFUNC_TDX_QEMU_BIOS_DIR:-/usr/share/qemu}")
++set(COFUNC_TDX_SMP "\${COFUNC_TDX_SMP:-32}")
++set(COFUNC_TDX_QEMU_BASE_OPTIONS
++    "-L ${COFUNC_TDX_QEMU_BIOS_DIR} -accel kvm -cpu host -object tdx-guest,id=tdx0 -machine q35,confidential-guest-support=tdx0,kernel-irqchip=split,smm=off -bios ${COFUNC_TDX_OVMF} -m 4G -smp ${COFUNC_TDX_SMP} -nodefaults -nographic -display none -serial mon:stdio -no-reboot -boot c -drive file=\$basedir/chcore.iso,if=none,id=bootdisk,format=raw,readonly=on -device virtio-blk-pci,drive=bootdisk,bootindex=1"
++)
++
+ if (CHCORE_KERNEL_ENABLE_QEMU_VIRTIO_NET)
+     chcore_generate_emulate_sh(
+-        "qemu-system-x86_64"
+-        "--enable-kvm -m 4G -cpu host -smp 4 -serial mon:stdio -nographic -cdrom \$basedir/chcore.iso -nic user,model=virtio-net-pci,hostfwd=tcp::1234-:9000,hostfwd=tcp::4096-:4096"
++        "${COFUNC_TDX_QEMU}"
++        "${COFUNC_TDX_QEMU_BASE_OPTIONS} -nic user,model=virtio-net-pci,hostfwd=tcp::1234-:9000,hostfwd=tcp::4096-:4096"
+     )
+ else()
+     chcore_generate_emulate_sh(
+-        "qemu-system-x86_64"
+-        "--enable-kvm -m 4G -cpu host -smp 4 -serial mon:stdio -nographic -cdrom \$basedir/chcore.iso"
++        "${COFUNC_TDX_QEMU}"
++        "${COFUNC_TDX_QEMU_BASE_OPTIONS}"
+     )
+ endif()
+diff --git a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
+index becf926..f880203 100644
+--- a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
++++ b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
+@@ -78,7 +78,6 @@ EXPORT(_start)
+ 	movl %eax, %edi /* multiboot_magic */
+ 	movl %ebx, %esi /* multiboot_info_ptr */
+ 
+-	wbinvd
+ 	/* set init stack */
+ 	movl $PADDR(stack+KSTACKSIZE), %esp
+ 
+diff --git a/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c b/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c
+index fa264e5..8e7346b 100644
+--- a/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c
++++ b/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c
+@@ -137,6 +137,11 @@ u8 get_cpu_apic_id(int cpu_id)
+ 	return madt_info.local_apic_ids[cpu_id];
+ }
+ 
++u8 get_cpu_count(void)
++{
++	return madt_info.processor_count;
++}
++
+ void madt_wakeup_cpu(int apic_id, u64 wakeup_vector)
+ {
+ 	mp_wakeup_mailbox->apic_id = apic_id;
+diff --git a/cvm_os/kernel/arch/x86_64/irq/irq_entry.c b/cvm_os/kernel/arch/x86_64/irq/irq_entry.c
+index e289856..cf13c66 100644
+--- a/cvm_os/kernel/arch/x86_64/irq/irq_entry.c
++++ b/cvm_os/kernel/arch/x86_64/irq/irq_entry.c
+@@ -158,6 +158,19 @@ void handle_irq(int irqno)
+ 
+ 	switch (irqno) {
+ 	case IRQ_TIMER:
++#ifdef CHCORE_SPLIT_CONTAINER
++		/*
++		 * Split-container can run threads that intentionally have no
++		 * scheduling context. They cannot participate in timeslice
++		 * accounting, so acknowledge/rearm the local timer without
++		 * invoking the scheduler on those threads.
++		 */
++		if (current_thread && current_thread->thread_ctx &&
++		    !current_thread->thread_ctx->sc) {
++			plat_handle_timer_irq(TICK_MS * 1000 * tick_per_us);
++			return;
++		}
++#endif /* CHCORE_SPLIT_CONTAINER */
+ 		handle_timer_irq();
+ 
+ 		/* Start the scheduler */
+diff --git a/cvm_os/kernel/arch/x86_64/machine/cpu.c b/cvm_os/kernel/arch/x86_64/machine/cpu.c
+index fefef23..6bfbac0 100644
+--- a/cvm_os/kernel/arch/x86_64/machine/cpu.c
++++ b/cvm_os/kernel/arch/x86_64/machine/cpu.c
+@@ -176,8 +176,7 @@ void wrpkru(int pkru)
+ 
+ /* enable/disable turbo boost */
+ #define TURBO_DISABLE_BIT 38
+-#define TURBO_DISABLE_MASK (1 << (38 - 32))
+-#define TURBO_ENABLE_MASK (~TURBO_DISABLE_MASK)
++#define TURBO_DISABLE_MASK (1UL << TURBO_DISABLE_BIT)
+ void set_turbo_boost(void)
+ {
+ 	u64 val;
+@@ -186,12 +185,12 @@ void set_turbo_boost(void)
+ 	// kinfo("%s, rdmsr: hi=%08x lo=%08x\n", __func__, hi, lo);
+ #if TURBO_ENABLED == 1
+ 	/* enable CPU turbo boost */
+-	val = val & ((u64)TURBO_ENABLE_MASK << 32);
++	val &= ~TURBO_DISABLE_MASK;
+ 	kinfo("Intel Turbo Boost is ENABLED.\n");
+ #else
+ 	/* disable CPU turbo boost */
+ 
+-	val = val | ((u64)TURBO_DISABLE_MASK << 32);
++	val |= TURBO_DISABLE_MASK;
+ 	kinfo("Intel Turbo Boost is DISABLED.\n");
+ #endif
+ 	wrmsr(0x1a0, val);
+@@ -287,8 +286,9 @@ void arch_cpu_init(void)
+ 	asm volatile ("finit":::"memory");
+ 	ldmxcsr(0x1f80);
+ 
+-
++#ifndef CHCORE_PLAT_INTEL_TDX
+ 	set_turbo_boost();
++#endif
+ 
+ #if LBR_ENABLED == 1
+ 	enable_lbr();
+diff --git a/cvm_os/kernel/arch/x86_64/machine/smp.c b/cvm_os/kernel/arch/x86_64/machine/smp.c
+index c13a3c6..822b758 100644
+--- a/cvm_os/kernel/arch/x86_64/machine/smp.c
++++ b/cvm_os/kernel/arch/x86_64/machine/smp.c
+@@ -89,6 +89,7 @@ void init_per_cpu_info(u32 cpuid)
+ void enable_smp_cores(void)
+ {
+ 	int cpuid;
++	int cpu_num;
+ #ifndef CHCORE_PLAT_INTEL_TDX
+ 	u64 mp_code;
+ 
+@@ -99,11 +100,8 @@ void enable_smp_cores(void)
+         memmove((void *)mp_code, (void *)(&_mp_start), (u64)(&_mp_start_end) - (u64)(&_mp_start));
+ #endif /* CHCORE_PLAT_INTEL_TDX */
+ 
+-	/*
+-	 * TODO: Since we can detect the real CPU number by reading the MADT,
+-	 * we can avoid using the static PLAT_CPU_NUM.
+-	 */
+-	for (cpuid = 1; cpuid < PLAT_CPU_NUM; cpuid ++)
++	cpu_num = MIN((int)PLAT_CPU_NUM, (int)get_cpu_count());
++	for (cpuid = 1; cpuid < cpu_num; cpuid ++)
+ 	{
+ 		/* Set kernel stack */
+ 		cur_cpu_stack = cpu_stacks[cpuid] + CPU_STACK_SIZE;
+diff --git a/cvm_os/kernel/arch/x86_64/main.c b/cvm_os/kernel/arch/x86_64/main.c
+index 2c91d88..23aa836 100644
+--- a/cvm_os/kernel/arch/x86_64/main.c
++++ b/cvm_os/kernel/arch/x86_64/main.c
+@@ -31,7 +31,6 @@
+ #ifdef CHCORE_PLAT_AMD_SEV
+ #include <sev.h>
+ #endif /* CHCORE_PLAT_AMD_SEV */
+-// #include <tdx.h>
+ // #include <arch/time.h>
+ 
+ /* Global big kernel lock */
+diff --git a/cvm_os/kernel/arch/x86_64/plat/intel_tdx/tdx.c b/cvm_os/kernel/arch/x86_64/plat/intel_tdx/tdx.c
+index f9f724b..58d828f 100644
+--- a/cvm_os/kernel/arch/x86_64/plat/intel_tdx/tdx.c
++++ b/cvm_os/kernel/arch/x86_64/plat/intel_tdx/tdx.c
+@@ -191,7 +191,10 @@ static unsigned long try_accept_one(paddr_t start, unsigned long len,
+ 	if ((ret = __tdx_module_call(TDX_ACCEPT_PAGE, tdcall_rcx, 0, 0, 0, NULL))) {
+ 		if ((ret >> 32) == 0xB0A)
+ 			return accept_size;
+-		printk("2M reject reason: 0x%lx, 0x%lx, %d\n", ret, start, (int)page_size);
++		kdebug("TDX accept reject reason: 0x%lx, 0x%lx, %d\n",
++		       ret,
++		       start,
++		       (int)page_size);
+ 		return 0;
+ 	}
+ 
+diff --git a/cvm_os/kernel/include/arch/x86_64/arch/drivers/acpi.h b/cvm_os/kernel/include/arch/x86_64/arch/drivers/acpi.h
+index 55a5cd1..d586501 100644
+--- a/cvm_os/kernel/include/arch/x86_64/arch/drivers/acpi.h
++++ b/cvm_os/kernel/include/arch/x86_64/arch/drivers/acpi.h
+@@ -13,5 +13,6 @@
+ #pragma once
+ 
+ void parse_acpi_info(void *info);
++u8 get_cpu_count(void);
+ u8 get_cpu_apic_id(int cpu_id);
+-void madt_wakeup_cpu(int apic_id, u64 wakeup_vector);
+\ No newline at end of file
++void madt_wakeup_cpu(int apic_id, u64 wakeup_vector);
+diff --git a/cvm_os/kernel/include/arch/x86_64/plat/intel_tdx/machine.h b/cvm_os/kernel/include/arch/x86_64/plat/intel_tdx/machine.h
+index 2677156..07244b9 100644
+--- a/cvm_os/kernel/include/arch/x86_64/plat/intel_tdx/machine.h
++++ b/cvm_os/kernel/include/arch/x86_64/plat/intel_tdx/machine.h
+@@ -82,4 +82,4 @@ static inline void cpuid(u32 op, u32 *eax, u32 *ebx, u32 *ecx, u32 *edx)
+ 		     : "a" (*eax), "c" (*ecx)
+ 		     : "memory");
+ }
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/cvm_os/kernel/split-container/split_container.c b/cvm_os/kernel/split-container/split_container.c
+index 2b1f64e..36ed7e2 100644
+--- a/cvm_os/kernel/split-container/split_container.c
++++ b/cvm_os/kernel/split-container/split_container.c
+@@ -54,7 +54,7 @@ struct {
+ static long hypercall(u32 nr, u64 p1, u64 p2, u64 p3)
+ {
+ #if defined(CHCORE_PLAT_INTEL_TDX)
+-        return tdx_do_hypercall(TDX_HYPERCALL_STANDARD, nr, p1, p2, p3);
++        return tdx_do_hypercall(nr, p1, p2, p3, 0);
+ #elif defined(CHCORE_PLAT_AMD_SEV)
+         return sev_snp_do_hypercall(nr, p1, p2, p3);
+ #else
+diff --git a/cvm_os/scripts/qemu/emulate.tpl.sh b/cvm_os/scripts/qemu/emulate.tpl.sh
+index 4d512f2..f6ed46a 100755
+--- a/cvm_os/scripts/qemu/emulate.tpl.sh
++++ b/cvm_os/scripts/qemu/emulate.tpl.sh
+@@ -10,6 +10,7 @@
+ # See the Mulan PSL v2 for more details.
+ 
+ set -e
++set -o pipefail
+ 
+ basedir=$(dirname "$0")
+ # basedir should be /build directory
+@@ -22,7 +23,22 @@ port=$(shuf -i 30000-40000 -n 1)
+ #		break
+ #	fi
+ #done
+-echo $port >$basedir/gdb-port
++gdb_port_file=${COFUNC_GDB_PORT_FILE:-$basedir/gdb-port}
++if ! { echo $port >"$gdb_port_file"; } 2>/dev/null; then
++	echo $port >"/tmp/chcore-gdb-port-${SLOT_ID:-0}"
++fi
+ 
+-$basedir/../scripts/qemu/qemu_wrapper.sh \
+-    @qemu@ -gdb tcp::$port @qemu_options@ | tee exec_log_${SLOT_ID:-0}
++exec_log=exec_log_${SLOT_ID:-0}
++tee_args=("$exec_log")
++if [ -n "${COFUNC_TRACE_DIR:-}" ] && mkdir -p "${COFUNC_TRACE_DIR}" 2>/dev/null; then
++    tee_args+=("${COFUNC_TRACE_DIR}/${exec_log}")
++fi
++
++{
++    printf 'timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
++    printf 'slot=%s\n' "${SLOT_ID:-0}"
++    printf 'qemu=%s\n' "@qemu@"
++    printf 'gdb_port=%s\n' "$port"
++    "$basedir/../scripts/qemu/qemu_wrapper.sh" \
++        @qemu@ -gdb tcp::$port @qemu_options@
++} 2>&1 | tee "${tee_args[@]}"
+diff --git a/shadow_container/Dockerfile b/shadow_container/Dockerfile
+index 80a0a95..1148777 100644
+--- a/shadow_container/Dockerfile
++++ b/shadow_container/Dockerfile
+@@ -1,4 +1,5 @@
+ FROM alpine:3.17
++ARG COFUNC_PLAT=amd_sev
+ RUN apk add build-base
+ RUN apk add linux-headers
+ RUN mkdir /runtime
+@@ -7,4 +8,8 @@ COPY config.h /runtime/config.h
+ COPY kvm_tdx.h /runtime/kvm_tdx.h
+ COPY kvm_sev.h /runtime/kvm_sev.h
+ COPY split_container.h /runtime/split_container.h
+-RUN gcc -Werror -o /runtime/runtime /runtime/main.c
++RUN if [ "$COFUNC_PLAT" = "intel_tdx" ]; then \
++        gcc -Werror -DCONFIG_PLAT_INTEL_TDX -o /runtime/runtime /runtime/main.c; \
++    else \
++        gcc -Werror -o /runtime/runtime /runtime/main.c; \
++    fi
+diff --git a/shadow_container/build.sh b/shadow_container/build.sh
+index 8c1a50c..f51a11b 100755
+--- a/shadow_container/build.sh
++++ b/shadow_container/build.sh
+@@ -1,3 +1,3 @@
+ #!/bin/bash
+ 
+-docker build -t split_container_builder .
++docker build --build-arg COFUNC_PLAT="${COFUNC_PLAT:-amd_sev}" -t split_container_builder .
+diff --git a/shadow_container/config.h b/shadow_container/config.h
+index 5a901b9..5d93bf8 100644
+--- a/shadow_container/config.h
++++ b/shadow_container/config.h
+@@ -1 +1,3 @@
++#if !defined(CONFIG_PLAT_AMD_SEV) && !defined(CONFIG_PLAT_INTEL_TDX)
+ #define CONFIG_PLAT_AMD_SEV
++#endif
+diff --git a/shadow_container/main.c b/shadow_container/main.c
+index 0d4d056..d536320 100644
+--- a/shadow_container/main.c
++++ b/shadow_container/main.c
+@@ -8,6 +8,7 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include <errno.h>
++#include <stdarg.h>
+ #include <pthread.h>
+ #include <sys/uio.h>
+ #include <sys/mman.h>
+@@ -57,7 +58,9 @@ static unsigned long mem_size = 2048UL * 1024 * 1024; // fake
+ static int small_shared_pool = 0;
+ static unsigned long gpa;
+ static void *anon;
+-#if defined(CONFIG_PLAT_AMD_SEV)
++#if defined(CONFIG_PLAT_INTEL_TDX)
++static int guest_memfd = -1;
++#elif defined(CONFIG_PLAT_AMD_SEV)
+ static int memfd;
+ #endif
+ static int argc;
+@@ -65,9 +68,24 @@ static char **argv;
+ static const char *mem_file = NULL;
+ static int enable_sync = 1;
+ static unsigned vm_slot_id = 0;
++static int sc_diag_enabled;
+ 
+ static int finish = 0;
+ 
++static void sc_diag(const char *fmt, ...)
++{
++        va_list ap;
++
++        if (!sc_diag_enabled) {
++                return;
++        }
++
++        va_start(ap, fmt);
++        fprintf(stderr, "[SC-D] ");
++        vfprintf(stderr, fmt, ap);
++        va_end(ap);
++}
++
+ static void pin(int cpu)
+ {
+         cpu_set_t cpuset;
+@@ -95,27 +113,27 @@ static void print_time(const char *str)
+ #if defined(CONFIG_PLAT_INTEL_TDX)
+ static long get_vmcall_op(struct kvm_run *run)
+ {
+-        return run->tdx.u.vmcall.subfunction;
++        return run->hypercall.nr;
+ }
+ 
+ static long get_vmcall_arg1(struct kvm_run *run)
+ {
+-        return run->tdx.u.vmcall.in_r12;
++        return run->hypercall.args[0];
+ }
+ 
+ static long get_vmcall_arg2(struct kvm_run *run)
+ {
+-        return run->tdx.u.vmcall.in_r13;
++        return run->hypercall.args[1];
+ }
+ 
+ static long get_vmcall_arg3(struct kvm_run *run)
+ {
+-        return run->tdx.u.vmcall.in_r14;
++        return run->hypercall.args[2];
+ }
+ 
+ static void set_vmcall_ret(struct kvm_run *run, long ret)
+ {
+-        run->tdx.u.vmcall.out_r11 = ret;
++        run->hypercall.ret = ret;
+ }
+ #elif defined(CONFIG_PLAT_AMD_SEV)
+ static long get_vmcall_op(struct kvm_run *run)
+@@ -149,7 +167,9 @@ static void grant_mem(void)
+ {
+         int ret;
+ #if defined(CONFIG_PLAT_INTEL_TDX)
+-        struct kvm_userspace_memory_region mem;
++        struct kvm_userspace_memory_region2 mem;
++        struct kvm_create_guest_memfd gmem;
++        struct kvm_memory_attributes attr;
+ #elif defined(CONFIG_PLAT_AMD_SEV)
+         struct kvm_userspace_memory_region2 mem;
+ #endif
+@@ -193,13 +213,26 @@ static void grant_mem(void)
+ 
+         anon = (void *)ALIGN_UP((unsigned long)anon, HPAGE_SIZE);
+ 
++        memset(&mem, 0, sizeof(mem));
+         mem.userspace_addr = (unsigned long)anon;
+         mem.guest_phys_addr = gpa;
+         mem.slot = slot;
+         mem.flags = 0;
+         mem.memory_size = mem_size;
+ 
+-#if defined(CONFIG_PLAT_AMD_SEV)
++#if defined(CONFIG_PLAT_INTEL_TDX)
++        memset(&gmem, 0, sizeof(gmem));
++        gmem.size = mem_size;
++        guest_memfd = ioctl(kvm_vm_fd, KVM_CREATE_GUEST_MEMFD, &gmem);
++        if (guest_memfd < 0) {
++                perror("create guest_memfd");
++                exit(EXIT_FAILURE);
++        }
++
++        mem.flags = KVM_MEM_GUEST_MEMFD;
++        mem.guest_memfd = guest_memfd;
++        mem.guest_memfd_offset = 0;
++#elif defined(CONFIG_PLAT_AMD_SEV)
+         memfd = syscall(451, 0); // __NR_memfd_restricted
+         if (memfd < 0) {
+                 perror("create memfd");
+@@ -212,7 +245,7 @@ static void grant_mem(void)
+ #endif
+ 
+ #if defined(CONFIG_PLAT_INTEL_TDX)
+-        ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION, &mem);
++        ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION2, &mem);
+ #elif defined(CONFIG_PLAT_AMD_SEV)
+         ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION2, &mem);
+ #endif
+@@ -222,6 +255,18 @@ static void grant_mem(void)
+                 exit(EXIT_FAILURE);
+         }
+ 
++#if defined(CONFIG_PLAT_INTEL_TDX)
++        memset(&attr, 0, sizeof(attr));
++        attr.address = gpa;
++        attr.size = mem_size;
++        attr.attributes = KVM_MEMORY_ATTRIBUTE_PRIVATE;
++        ret = ioctl(kvm_vm_fd, KVM_SET_MEMORY_ATTRIBUTES, &attr);
++        if (ret < 0) {
++                perror("initialize private memory attributes");
++                exit(EXIT_FAILURE);
++        }
++#endif
++
+         debug("[SC-H] grant_mem: HVA=%p\n", anon);
+ }
+ 
+@@ -229,7 +274,7 @@ static void remove_mem(void)
+ {
+         int ret;
+ #if defined(CONFIG_PLAT_INTEL_TDX)
+-        struct kvm_userspace_memory_region mem;
++        struct kvm_userspace_memory_region2 mem;
+ #elif defined(CONFIG_PLAT_AMD_SEV)
+         struct kvm_userspace_memory_region2 mem;
+ #endif
+@@ -238,18 +283,23 @@ static void remove_mem(void)
+                 return;
+         }
+ 
++        memset(&mem, 0, sizeof(mem));
+         mem.userspace_addr = (unsigned long long)anon;
+         mem.guest_phys_addr = gpa;
+         mem.slot = slot;
+         mem.flags = 0;
+         mem.memory_size = 0;
++#if defined(CONFIG_PLAT_INTEL_TDX)
++        mem.guest_memfd = guest_memfd;
++        mem.guest_memfd_offset = 0;
++#endif
+ #if defined(CONFIG_PLAT_AMD_SEV)
+         mem.restrictedmem_fd = memfd;
+         mem.restrictedmem_offset = 0;
+ #endif
+ 
+ #if defined(CONFIG_PLAT_INTEL_TDX)
+-        ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION, &mem);
++        ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION2, &mem);
+ #elif defined(CONFIG_PLAT_AMD_SEV)
+         ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION2, &mem);
+ #endif
+@@ -259,19 +309,27 @@ static void remove_mem(void)
+                 exit(EXIT_FAILURE);
+         }
+ 
++#if defined(CONFIG_PLAT_INTEL_TDX)
++        if (guest_memfd >= 0) {
++                close(guest_memfd);
++                guest_memfd = -1;
++        }
++#endif
++
+         debug("[SC-H] remove mem\n");
+ }
+ 
+-static void __assert(int x)
++static void sc_assert(int x, const char *expr, const char *file, int line)
+ {
+         if (!x) {
+-                debug("error!\n");
++                fprintf(stderr, "[SC-D] assert failed: %s at %s:%d\n",
++                        expr, file, line);
+                 remove_mem();
+                 exit(EXIT_FAILURE);
+         }
+ }
+ #undef assert
+-#define assert __assert
++#define assert(x) sc_assert((x), #x, __FILE__, __LINE__)
+ 
+ double t_shadow_begin;
+ double t_sc_init;
+@@ -1076,8 +1134,13 @@ static void __handle_request_with_shm(struct sc_shm *shm)
+ }
+ 
+ static void handle_request_with_shm(unsigned long shm_gpa)
+-{        
+-        __handle_request_with_shm(anon + (shm_gpa - gpa));
++{
++        struct sc_shm *shm = anon + (shm_gpa - gpa);
++
++        sc_diag("shm request gpa=0x%lx req=%d\n", shm_gpa, shm->req);
++        __handle_request_with_shm(shm);
++        sc_diag("shm request done req=%d ret=%ld time=%lu\n",
++                shm->req, shm->ret, shm->time);
+ }
+ 
+ void vcpu_pause(void)
+@@ -1173,7 +1236,13 @@ void wait_finish(void)
+ 
+ static void handle_request(struct kvm_run *run)
+ {
+-        switch (get_vmcall_arg1(run)) {
++        long req = get_vmcall_arg1(run);
++
++        sc_diag("request req=%ld arg2=0x%lx arg3=0x%lx ret=%ld\n",
++                req, get_vmcall_arg2(run), get_vmcall_arg3(run),
++                run->hypercall.ret);
++
++        switch (req) {
+         case SC_REQ_DEBUG_PUTC:
+                 putchar(get_vmcall_arg2(run));
+                 fflush(stdout);
+@@ -1227,11 +1296,82 @@ static void handle_request(struct kvm_run *run)
+         }
+ }
+ 
++static void handle_map_gpa_range(struct kvm_run *run, int kvm_vcpu_fd)
++{
++        struct kvm_memory_attributes attr;
++        struct kvm_pre_fault_memory fault;
++        unsigned long map_gpa = get_vmcall_arg1(run);
++        unsigned long npages = get_vmcall_arg2(run);
++        unsigned long attrs = get_vmcall_arg3(run);
++        unsigned long map_size = npages << 12;
++        unsigned long offset;
++        int in_shadow_region;
++        int ret;
++        int saved_errno = 0;
++
++        memset(&attr, 0, sizeof(attr));
++        attr.address = map_gpa;
++        attr.size = map_size;
++        attr.attributes = (attrs & KVM_MAP_GPA_RANGE_ENCRYPTED) ?
++                KVM_MEMORY_ATTRIBUTE_PRIVATE : 0;
++
++        ret = ioctl(kvm_vm_fd, KVM_SET_MEMORY_ATTRIBUTES, &attr);
++        if (ret < 0) {
++                saved_errno = errno;
++        }
++
++        sc_diag("map_gpa gpa=0x%lx pages=0x%lx attrs=0x%lx kvm_attrs=0x%lx ret=%d errno=%d\n",
++                map_gpa, npages, attrs, attr.attributes, ret, saved_errno);
++
++        if (ret < 0) {
++                set_vmcall_ret(run, -saved_errno);
++                return;
++        }
++
++        in_shadow_region = map_gpa >= gpa &&
++                map_size <= mem_size &&
++                map_gpa - gpa <= mem_size - map_size;
++        if (in_shadow_region) {
++                offset = map_gpa - gpa;
++                if (attr.attributes == KVM_MEMORY_ATTRIBUTE_PRIVATE) {
++                        ret = madvise(anon + offset, map_size, MADV_DONTNEED);
++                        if (ret < 0) {
++                                sc_diag("discard shared backing failed offset=0x%lx size=0x%lx errno=%d\n",
++                                        offset, map_size, errno);
++                        }
++#if defined(CONFIG_PLAT_INTEL_TDX)
++                } else if (guest_memfd >= 0) {
++                        ret = fallocate(guest_memfd,
++                                        FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
++                                        offset, map_size);
++                        if (ret < 0) {
++                                sc_diag("discard private backing failed offset=0x%lx size=0x%lx errno=%d\n",
++                                        offset, map_size, errno);
++                        }
++#endif
++                }
++        }
++
++        memset(&fault, 0, sizeof(fault));
++        fault.gpa = map_gpa;
++        fault.size = map_size;
++        while (fault.size) {
++                if (ioctl(kvm_vcpu_fd, KVM_PRE_FAULT_MEMORY, &fault) < 0) {
++                        sc_diag("prefault skipped gpa=0x%lx size=0x%lx errno=%d\n",
++                                fault.gpa, fault.size, errno);
++                        break;
++                }
++        }
++
++        set_vmcall_ret(run, 0);
++}
++
+ static void *shadow_thread_routine(void *args)
+ {
+         int kvm_vcpu_fd, ret;
+         struct kvm_run *run;
+         long thread = (long)args;
++        unsigned long iter = 0;
+ 
+         kvm_vcpu_fd = ioctl(kvm_vm_fd, KVM_SC_ALLOC_VCPU);
+         if (kvm_vcpu_fd < 0) {
+@@ -1247,6 +1387,8 @@ static void *shadow_thread_routine(void *args)
+         }
+ 
+         set_vmcall_ret(run, thread);
++        sc_diag("vcpu allocated fd=%d thread=0x%lx initial_ret=0x%lx\n",
++                kvm_vcpu_fd, thread, run->hypercall.ret);
+         for (;;) {
+                 ret = ioctl(kvm_vcpu_fd, KVM_RUN, 0);
+                 if (ret < 0 && errno == EINTR) {
+@@ -1257,12 +1399,20 @@ static void *shadow_thread_routine(void *args)
+                         exit(EXIT_FAILURE);
+                 }
+ 
++                sc_diag("kvm_run iter=%lu exit=%u op=0x%lx arg1=0x%lx arg2=0x%lx arg3=0x%lx ret=0x%lx\n",
++                        iter++, run->exit_reason, get_vmcall_op(run),
++                        get_vmcall_arg1(run), get_vmcall_arg2(run),
++                        get_vmcall_arg3(run), run->hypercall.ret);
++
+                 switch (get_vmcall_op(run)) {
+                 case VMCALL_SC_VCPU_IDLE:
+                         goto out;
+                 case VMCALL_SC_REQUEST:
+                         handle_request(run);
+                         break;
++                case KVM_HC_MAP_GPA_RANGE:
++                        handle_map_gpa_range(run, kvm_vcpu_fd);
++                        break;
+                 default:
+                         assert(0);
+                         break;
+@@ -1367,6 +1517,8 @@ int main(int __argc, char *__argv[])
+ {       
+         struct sigaction sa;
+ 
++        sc_diag_enabled = getenv("SC_DIAG") != NULL;
++
+         argc = __argc - 1;
+         argv = __argv + 1;
+ 
+diff --git a/shadow_container/split_container.h b/shadow_container/split_container.h
+index 2285d72..5fd4e41 100644
+--- a/shadow_container/split_container.h
++++ b/shadow_container/split_container.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include "config.h"
++#include <stdint.h>
+ #include <poll.h>
+ #include <signal.h>
+ #include <semaphore.h>
+@@ -11,6 +12,74 @@
+ #define KVM_SC_GET_VM		_IO(KVMIO,    0x10)
+ #define KVM_SC_ALLOC_VCPU	_IO(KVMIO,    0x11)
+ 
++#ifndef KVM_MEM_GUEST_MEMFD
++#define KVM_MEM_GUEST_MEMFD     (1UL << 2)
++#endif
++
++#ifndef KVM_SET_USER_MEMORY_REGION2
++struct kvm_userspace_memory_region2 {
++        uint32_t slot;
++        uint32_t flags;
++        uint64_t guest_phys_addr;
++        uint64_t memory_size;
++        uint64_t userspace_addr;
++        uint64_t guest_memfd_offset;
++        uint32_t guest_memfd;
++        uint32_t pad1;
++        uint64_t pad2[14];
++};
++
++#define KVM_SET_USER_MEMORY_REGION2 _IOW(KVMIO, 0x49, struct kvm_userspace_memory_region2)
++#endif
++
++#ifndef KVM_CREATE_GUEST_MEMFD
++struct kvm_create_guest_memfd {
++        uint64_t size;
++        uint64_t flags;
++        uint64_t reserved[6];
++};
++
++#define GUEST_MEMFD_FLAG_MMAP        (1ULL << 0)
++#define GUEST_MEMFD_FLAG_INIT_SHARED (1ULL << 1)
++#define KVM_CREATE_GUEST_MEMFD _IOWR(KVMIO, 0xd4, struct kvm_create_guest_memfd)
++#endif
++
++#ifndef KVM_HC_MAP_GPA_RANGE
++#define KVM_HC_MAP_GPA_RANGE    12
++#endif
++
++#ifndef KVM_MAP_GPA_RANGE_ENC_STAT
++#define KVM_MAP_GPA_RANGE_PAGE_SZ_4K   0
++#define KVM_MAP_GPA_RANGE_PAGE_SZ_2M   (1 << 0)
++#define KVM_MAP_GPA_RANGE_PAGE_SZ_1G   (1 << 1)
++#define KVM_MAP_GPA_RANGE_ENC_STAT(n)  ((n) << 4)
++#define KVM_MAP_GPA_RANGE_ENCRYPTED    KVM_MAP_GPA_RANGE_ENC_STAT(1)
++#define KVM_MAP_GPA_RANGE_DECRYPTED    KVM_MAP_GPA_RANGE_ENC_STAT(0)
++#endif
++
++#ifndef KVM_MEMORY_ATTRIBUTE_PRIVATE
++struct kvm_memory_attributes {
++        uint64_t address;
++        uint64_t size;
++        uint64_t attributes;
++        uint64_t flags;
++};
++
++#define KVM_SET_MEMORY_ATTRIBUTES _IOW(KVMIO, 0xd2, struct kvm_memory_attributes)
++#define KVM_MEMORY_ATTRIBUTE_PRIVATE (1ULL << 3)
++#endif
++
++#ifndef KVM_PRE_FAULT_MEMORY
++struct kvm_pre_fault_memory {
++        uint64_t gpa;
++        uint64_t size;
++        uint64_t flags;
++        uint64_t padding[5];
++};
++
++#define KVM_PRE_FAULT_MEMORY _IOWR(KVMIO, 0xd5, struct kvm_pre_fault_memory)
++#endif
++
+ #if defined(CONFIG_PLAT_INTEL_TDX)
+ #define VMCALL_SC_VCPU_IDLE     0x10010
+ #define VMCALL_SC_REQUEST       0x10011
+@@ -396,4 +465,3 @@ struct sc_shm {
+         };
+         char data[0];
+ };
+-
+diff --git a/testcases/tools/cvm.sh b/testcases/tools/cvm.sh
+index 561cd0f..3df1c1f 100755
+--- a/testcases/tools/cvm.sh
++++ b/testcases/tools/cvm.sh
+@@ -1,34 +1,92 @@
+ #!/bin/bash -e
+ 
+-cvm_path=$(dirname $0)/../../cvm_os
++cvm_path=$(dirname "$0")/../../cvm_os
+ slot_id=${SLOT_ID:-0}
+ session=split-container-cvm-${slot_id}
++use_sudo=${COFUNC_CVM_USE_SUDO:-0}
++boot_timeout=${COFUNC_CVM_BOOT_TIMEOUT:-180}
++trace_root=${COFUNC_TRACE_ROOT:-/var/tmp/cofunc-trace}
++
++max_vcpus=$(cat /sys/module/kvm_intel/parameters/max_vcpus 2>/dev/null || true)
++if [[ -z $max_vcpus ]]; then
++        max_vcpus=$(cat /sys/module/kvm/parameters/max_vcpus 2>/dev/null || true)
++fi
++if [[ -z $max_vcpus ]]; then
++        max_vcpus=32
++fi
++tdx_smp=${COFUNC_TDX_SMP:-$max_vcpus}
++
++run_maybe_sudo() {
++        if [[ $use_sudo == 1 ]]; then
++                sudo "$@"
++        else
++                "$@"
++        fi
++}
+ 
+ clean() {
+         until [[ -z $(pidof qemu-system-x86_64) ]]; do
+-                sudo pkill -9 qemu &>/dev/null || true
++                run_maybe_sudo pkill -9 qemu &>/dev/null || true
+         done
+-        sudo screen -X -S $session quit &>/dev/null || true
++        run_maybe_sudo screen -X -S "$session" quit &>/dev/null || true
+ }
+ 
+-if [[ $1 == "clean" ]]; then
++if [[ ${1:-} == "clean" ]]; then
+         clean
+         exit 0
+ fi
+ 
+-if [[ -z $SLOT_ID ]]; then
++if [[ -z ${SLOT_ID:-} ]]; then
+         clean
+ fi
+ 
+-pushd $cvm_path
++pushd "$cvm_path"
++
++exec_log=exec_log_${slot_id}
++trace_dir=${trace_root}/cvm-${slot_id}-$(date -u +%Y%m%d_%H%M%S)
++mkdir -p "$trace_dir" 2>/dev/null || true
++
++run_maybe_sudo rm -f "$exec_log"
++touch "$exec_log"
+ 
+-sudo rm -f exec_log_$slot_id
+-touch exec_log_$slot_id
++{
++        printf 'slot=%s\n' "$slot_id"
++        printf 'session=%s\n' "$session"
++        printf 'cwd=%s\n' "$PWD"
++        printf 'boot_timeout=%s\n' "$boot_timeout"
++        printf 'max_vcpus=%s\n' "$max_vcpus"
++        printf 'tdx_smp=%s\n' "$tdx_smp"
++        printf 'qemu=%s\n' "${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}"
++        uname -a
++        "${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}" --version 2>&1 | head -5 || true
++        cp -a build/simulate.sh "$trace_dir/simulate.sh" 2>/dev/null || true
++} >"$trace_dir/launch-env.log" 2>&1 || true
+ 
+-sudo SLOT_ID=$slot_id screen -dmS $session build/simulate.sh
++run_maybe_sudo env \
++        SLOT_ID="$slot_id" \
++        COFUNC_TDX_SMP="$tdx_smp" \
++        COFUNC_TRACE_DIR="$trace_dir" \
++        screen -L -Logfile "$trace_dir/screen.log" -dmS "$session" build/simulate.sh
+ 
+-until [[ ! -z $(cat exec_log_$slot_id | grep "ChCore shell") ]]; do
++start_ts=$(date +%s)
++until grep -q "ChCore shell" "$exec_log"; do
++        if ! run_maybe_sudo screen -list | grep -Fq ".$session"; then
++                cp -a "$exec_log" "$trace_dir/$exec_log.failed" 2>/dev/null || true
++                echo "CVM screen session exited before ChCore shell; see $trace_dir and $cvm_path/$exec_log" >&2
++                tail -n 80 "$exec_log" >&2 || true
++                tail -n 80 "$trace_dir/screen.log" >&2 || true
++                exit 1
++        fi
++        now_ts=$(date +%s)
++        if (( now_ts - start_ts >= boot_timeout )); then
++                cp -a "$exec_log" "$trace_dir/$exec_log.timeout" 2>/dev/null || true
++                echo "Timed out waiting for ChCore shell after ${boot_timeout}s; see $trace_dir and $cvm_path/$exec_log" >&2
++                tail -n 80 "$exec_log" >&2 || true
++                tail -n 80 "$trace_dir/screen.log" >&2 || true
++                exit 1
++        fi
+         sleep 1
+ done
++cp -a "$exec_log" "$trace_dir/$exec_log.ready" 2>/dev/null || true
+ 
+ popd
+diff --git a/testcases/tools/sc-snapshot.sh b/testcases/tools/sc-snapshot.sh
+index dc9193c..e575b7d 100755
+--- a/testcases/tools/sc-snapshot.sh
++++ b/testcases/tools/sc-snapshot.sh
+@@ -9,7 +9,10 @@ session=split-container-snapshot-${slot_id}
+ clean() {
+         until [[ -z $(docker ps -a | grep snapshot) ]]; do
+                 sudo pkill -9 sc-runtime || true
++                docker ps -a --format '{{.Names}}' | grep snapshot | xargs -r docker rm -f &>/dev/null || true
++                sleep 1
+         done
++        sudo screen -X -S $session quit &>/dev/null || true
+         screen -X -S $session quit &>/dev/null || true
+ }
+ 
+diff --git a/testcases/tools/start.sh b/testcases/tools/start.sh
+index a93ff2e..2968a0d 100755
+--- a/testcases/tools/start.sh
++++ b/testcases/tools/start.sh
+@@ -16,6 +16,11 @@ slot_id=${SLOT_ID:-0}
+ # fi
+ 
+ cpu_param="--cpuset-cpus 0"
++docker_tty=${COFUNC_DOCKER_TTY:-1}
++docker_stdio=(-it)
++if [[ $docker_tty == 0 ]]; then
++        docker_stdio=(-i)
++fi
+ 
+ if [[ $runtime == "runc" ]]; then
+         command=$command
+@@ -52,7 +57,7 @@ for i in $(seq $times); do
+ 
+         printf "t_begin %s\n" $t_begin | tee -a $exec_log
+ 
+-        docker run -it --rm --privileged --net=host $cpu_param --name $name \
++        docker run "${docker_stdio[@]}" --rm --privileged --net=host $cpu_param --name $name \
+                 -v /dev:/dev --tmpfs /tmp --tmpfs /run \
+                 $fn_name /tools/start.sh $command | tee -a $exec_log
+ 
+diff --git a/testcases/tools/tasks/clean/action.sh b/testcases/tools/tasks/clean/action.sh
+index dbcae54..27fe9a8 100755
+--- a/testcases/tools/tasks/clean/action.sh
++++ b/testcases/tools/tasks/clean/action.sh
+@@ -6,7 +6,7 @@ fn_name=$1
+ 
+ tools=$(dirname $(realpath $0))/../..
+ 
+-pushd $tools/../$fn_name
++pushd $tools/../testcases/$fn_name
+ $tools/lean_container/rootfs.sh clean
+ $tools/lean_container/cgroup.sh clean
+ $tools/hugepage.sh clean
+diff --git a/testcases/tools/tasks/run_sc_fork/action.sh b/testcases/tools/tasks/run_sc_fork/action.sh
+index 355df3a..e653cf4 100755
+--- a/testcases/tools/tasks/run_sc_fork/action.sh
++++ b/testcases/tools/tasks/run_sc_fork/action.sh
+@@ -11,6 +11,16 @@ tools=$(dirname $(realpath $0))/../..
+ 
+ pushd $tools/../testcases/$fn_name
+ 
++cleanup() {
++        set +e
++        $tools/sc-snapshot.sh clean
++        $tools/cvm.sh clean
++        $tools/lean_container/rootfs.sh clean
++        $tools/lean_container/cgroup.sh clean
++        $tools/hugepage.sh clean
++}
++trap cleanup EXIT
++
+ mkdir -p $log_dir
+ rm -f $log_file
+ 
+@@ -20,18 +30,14 @@ fi
+ 
+ $tools/lean_container/rootfs.sh
+ $tools/lean_container/cgroup.sh
+-# $tools/hugepage.sh
++$tools/hugepage.sh
+ 
+ $tools/cvm.sh
+ $tools/sc-snapshot.sh
+ 
+ sudo $tools/lean_container/start.sh sc-fork $log_file $times
+ 
+-$tools/sc-snapshot.sh clean
+-$tools/cvm.sh clean
+-
+-$tools/lean_container/rootfs.sh clean
+-$tools/lean_container/cgroup.sh clean
+-# $tools/hugepage.sh clean
++trap - EXIT
++cleanup
+ 
+ popd
+-- 
+2.34.1
+

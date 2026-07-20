@@ -1,0 +1,140 @@
+{
+  "inputs": {
+    "cofunc": {
+      "path": "/home/booklyn/BookArchive/Images/stage_breakdown_oldabi_tdx_fig11_20260708_073907.json",
+      "sha256": "3866111f4973b9474999e3185c0ad5184693c5a9b0d4ca96dd6326ad179b947f"
+    },
+    "kata": {
+      "path": "/home/booklyn/BookArchive/Images/stage_breakdown_kata_tdx_vanilla_fig11_20260716_185434.json",
+      "sha256": "b814b6d72281a8fdcb5b69f81f2dbbb2f246d7c7b6763b1f47b39743853b02e2"
+    },
+    "native": {
+      "path": "/home/booklyn/BookArchive/Images/measured_tdx_fig11_paper_aligned_stages_20260717_060234/native_paper_model.json",
+      "sha256": "1844d06be71cec71ea50dca1d074f3e6e6ff4f040223318e5a768817dbffa157"
+    }
+  },
+  "native_policy": "measured native-fork for Python; released artifact's fork-equivalent model for JavaScript",
+  "rows": [
+    {
+      "app": "fn_py_face_detection",
+      "cofunc_over_native": 2.9993529362784854,
+      "cofunc_over_native_pct": 199.93529362784855,
+      "cofunc_s": 1.5643376231193542,
+      "functions": [
+        "fn_py_face_detection"
+      ],
+      "kata_over_cofunc": 11.11027859073608,
+      "kata_s": 17.380226802825927,
+      "label": "face\n(py)",
+      "native_s": 0.5215583682060242
+    },
+    {
+      "app": "fn_py_image_processing",
+      "cofunc_over_native": 2.8712160608461623,
+      "cofunc_over_native_pct": 187.12160608461625,
+      "cofunc_s": 10.235655343532562,
+      "functions": [
+        "fn_py_image_processing"
+      ],
+      "kata_over_cofunc": 1.925094186458549,
+      "kata_s": 19.704600596427916,
+      "label": "image\n(py)",
+      "native_s": 3.564919924736023
+    },
+    {
+      "app": "fn_py_sentiment",
+      "cofunc_over_native": 3.125294315951035,
+      "cofunc_over_native_pct": 212.5294315951035,
+      "cofunc_s": 0.18312312364578248,
+      "functions": [
+        "fn_py_sentiment"
+      ],
+      "kata_over_cofunc": 86.14426493122636,
+      "kata_s": 15.775006878376008,
+      "label": "sentiment\n(py)",
+      "native_s": 0.0585938811302185
+    },
+    {
+      "app": "fn_py_video_processing",
+      "cofunc_over_native": 2.905461664862851,
+      "cofunc_over_native_pct": 190.54616648628507,
+      "cofunc_s": 63.47037582397461,
+      "functions": [
+        "fn_py_video_processing"
+      ],
+      "kata_over_cofunc": 0.7280487056424767,
+      "kata_s": 46.209524965286256,
+      "label": "video\n(py)",
+      "native_s": 21.845194721221922
+    },
+    {
+      "app": "fn_py_compression",
+      "cofunc_over_native": 3.672664164910535,
+      "cofunc_over_native_pct": 267.2664164910535,
+      "cofunc_s": 2.2597598314285277,
+      "functions": [
+        "fn_py_compression"
+      ],
+      "kata_over_cofunc": 7.266452263733281,
+      "kata_s": 16.42043694257736,
+      "label": "compress\n(py)",
+      "native_s": 0.6152917146682739
+    },
+    {
+      "app": "fn_py_dna_visualisation",
+      "cofunc_over_native": 2.139774465269801,
+      "cofunc_over_native_pct": 113.9774465269801,
+      "cofunc_s": 18.640203762054444,
+      "functions": [
+        "fn_py_dna_visualisation"
+      ],
+      "kata_over_cofunc": 1.3310053556976247,
+      "kata_s": 24.81021103858948,
+      "label": "dna\n(py)",
+      "native_s": 8.71129367351532
+    },
+    {
+      "app": "fn_js_uploader",
+      "cofunc_over_native": 3.7447181182909106,
+      "cofunc_over_native_pct": 274.47181182909105,
+      "cofunc_s": 0.5409097671508789,
+      "functions": [
+        "fn_js_uploader"
+      ],
+      "kata_over_cofunc": 29.156364171302133,
+      "kata_s": 15.770962154865265,
+      "label": "upload\n(js)",
+      "native_s": 0.14444605710342495
+    },
+    {
+      "app": "fn_js_thumbnailer",
+      "cofunc_over_native": 3.236255991699935,
+      "cofunc_over_native_pct": 223.6255991699935,
+      "cofunc_s": 0.49408206939697263,
+      "functions": [
+        "fn_js_thumbnailer"
+      ],
+      "kata_over_cofunc": 32.66457467399986,
+      "kata_s": 16.138980650901793,
+      "label": "thumbnail\n(js)",
+      "native_s": 0.15267088594479267
+    },
+    {
+      "app": "chain_js_alexa",
+      "cofunc_over_native": 3.1109786003435307,
+      "cofunc_over_native_pct": 211.09786003435306,
+      "cofunc_s": 0.7048441648483277,
+      "functions": [
+        "chain_js_alexa/fn_js_alexa_frontend",
+        "chain_js_alexa/fn_js_alexa_interact",
+        "chain_js_alexa/fn_js_alexa_smarthome",
+        "chain_js_alexa/fn_js_alexa_tv"
+      ],
+      "kata_over_cofunc": 88.54705566261582,
+      "kata_s": 62.41187549829483,
+      "label": "alexa\n(js)",
+      "native_s": 0.22656670308516266
+    }
+  ],
+  "sample_policy": "artifact-first-N; no outlier removal"
+}

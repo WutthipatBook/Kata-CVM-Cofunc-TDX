@@ -1,0 +1,110 @@
+diff --git a/testcases/tools/lean_container/start.sh b/testcases/tools/lean_container/start.sh
+index 88e6d7b..5e1f44d 100755
+--- a/testcases/tools/lean_container/start.sh
++++ b/testcases/tools/lean_container/start.sh
+@@ -13,6 +13,15 @@ name=$fn_name
+ times=${3:-1}
+ tools=$(dirname $0)/..
+ mem_file="/dev/hugepages/split_container/${fn_name}_1"
++regular_memfile="${COFUNC_OLDABI_REGULAR_MEMFILE:-0}"
++regular_memfile_host=""
++
++cleanup_regular_memfile() {
++        if [[ -n ${regular_memfile_host:-} ]]; then
++                rm -f "$regular_memfile_host"
++        fi
++}
++
+ 
+ # if [[ "$fn_name" =~ "_py_" ]]; then
+ #         cpu_param="--cpuset-cpus 0"
+@@ -23,6 +32,15 @@ if [[ $(whoami) != "root" ]]; then
+         exit 1
+ fi
+ 
++if [[ $regular_memfile != 0 && $regular_memfile != 1 ]]; then
++        echo "COFUNC_OLDABI_REGULAR_MEMFILE must be 0 or 1"
++        exit 1
++fi
++
++if [[ $regular_memfile == 1 ]]; then
++        mem_file="/tmp/split_container/${fn_name}_1"
++fi
++
+ if [[ $runtime == "fork" ]]; then
+         command="$command --lean-fork ${fn_name}"
+         name="${fn_name}_zygote"
+@@ -43,9 +60,17 @@ elif [[ $runtime == "shell" ]]; then
+ else
+         exit 1
+ fi
+ 
++if [[ $regular_memfile == 1 ]]; then
++        regular_memfile_host=".rootfs/$name$mem_file"
++        mkdir -p "$(dirname "$regular_memfile_host")"
++        rm -f "$regular_memfile_host"
++        truncate -s "${mem_size}M" "$regular_memfile_host"
++        trap cleanup_regular_memfile EXIT
++fi
++
+ # if [[ $result_log != "" ]]; then
+ #         echo "new test @ $(date)" >> $result_log
+ # fi
+ 
+ for i in $(seq $times); do
+diff --git a/testcases/tools/tasks/run_sc_fork/action.sh b/testcases/tools/tasks/run_sc_fork/action.sh
+index 355df3a..9f96c7d 100755
+--- a/testcases/tools/tasks/run_sc_fork/action.sh
++++ b/testcases/tools/tasks/run_sc_fork/action.sh
+@@ -11,6 +11,20 @@ tools=$(dirname $(realpath $0))/../..
+ 
+ pushd $tools/../testcases/$fn_name
+ 
++cleanup() {
++        set +e
++        $tools/sc-snapshot.sh clean
++        $tools/cvm.sh clean
++        $tools/lean_container/rootfs.sh clean
++        $tools/lean_container/cgroup.sh clean
++        if [[ ${COFUNC_OLDABI_REGULAR_MEMFILE:-0} == 1 ]]; then
++                sudo rm -f ".rootfs/${fn_name}_1/tmp/split_container/${fn_name}_1"
++        else
++                $tools/hugepage.sh clean
++        fi
++}
++trap cleanup EXIT
++
+ mkdir -p $log_dir
+ rm -f $log_file
+ 
+@@ -20,18 +34,22 @@ fi
+ 
+ $tools/lean_container/rootfs.sh
+ $tools/lean_container/cgroup.sh
+-# $tools/hugepage.sh
++if [[ ${COFUNC_OLDABI_REGULAR_MEMFILE:-0} == 1 ]]; then
++        :
++else
++        if [[ ${COFUNC_COMPACT_BEFORE_HUGEPAGE:-1} == 1 ]]; then
++                echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null || true
++        fi
++        $tools/hugepage.sh
++fi
+ 
+ $tools/cvm.sh
+ $tools/sc-snapshot.sh
+ 
+-sudo $tools/lean_container/start.sh sc-fork $log_file $times
++sudo env COFUNC_OLDABI_REGULAR_MEMFILE="${COFUNC_OLDABI_REGULAR_MEMFILE:-0}" \
++        $tools/lean_container/start.sh sc-fork $log_file $times
+ 
+-$tools/sc-snapshot.sh clean
+-$tools/cvm.sh clean
+-
+-$tools/lean_container/rootfs.sh clean
+-$tools/lean_container/cgroup.sh clean
+-# $tools/hugepage.sh clean
++trap - EXIT
++cleanup
+ 
+ popd

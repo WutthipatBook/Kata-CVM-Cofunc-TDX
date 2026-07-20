@@ -1,0 +1,196 @@
+From 7d1f8cb0b66d18af3d09db26ad69ce818ff3b0b5 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Wed, 1 Jul 2026 06:30:00 +0000
+Subject: [PATCH] KVM: Diagnostic log private fault mapping levels
+
+The old-ABI TDX runs show a large guest-side page-fault/grant cost while the
+guest split-container allocator attempts 2MB accepts. The guest logs also show
+2MB accept rejections, which likely force fallback to 4KB accepts.
+
+Add bounded diagnostic logging at the host KVM private-memory mapping decision
+points:
+
+  * private memfile PFN order returned by kvm_private_mem_get_pfn()
+  * KVM hugepage adjustment levels for private faults
+  * final direct-map walk level before installing the private SPTE
+  * TDX finalized TDH.MEM.PAGE.AUG private SEPT level
+
+If the private backing order, KVM goal level, and TDX SEPT level are PG_LEVEL_4K,
+the guest's 2MB accepts are rejected because the host is installing 4KB private
+SEPT leaves.
+
+diff -uNr base/arch/x86/kvm/mmu/mmu.c mod/arch/x86/kvm/mmu/mmu.c
+--- base/arch/x86/kvm/mmu/mmu.c	2026-07-01 06:14:50.535847903 +0000
++++ mod/arch/x86/kvm/mmu/mmu.c	2026-07-01 06:18:40.372962852 +0000
+@@ -27,6 +27,7 @@
+ #include "spte.h"
+ 
+ #include <linux/kvm_host.h>
++#include <linux/atomic.h>
+ #include <linux/types.h>
+ #include <linux/string.h>
+ #include <linux/mm.h>
+@@ -111,6 +112,36 @@
+ 
+ #include <trace/events/kvm.h>
+ 
++/*
++ * CoFunc old-ABI private fault level diagnostic: bounded printk probes for
++ * private memfile order, KVM mapping level, and the final private SPTE level.
++ */
++static atomic_t cofunc_tdx_private_fault_log_budget = ATOMIC_INIT(96);
++static atomic_t cofunc_tdx_private_adjust_log_budget = ATOMIC_INIT(96);
++static atomic_t cofunc_tdx_private_map_log_budget = ATOMIC_INIT(96);
++
++static bool cofunc_tdx_take_log_slot(atomic_t *budget)
++{
++	return atomic_dec_if_positive(budget) >= 0;
++}
++
++static int cofunc_tdx_gfn_2m_aligned(gfn_t gfn)
++{
++	return !(gfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1));
++}
++
++static int cofunc_tdx_pfn_2m_aligned(kvm_pfn_t pfn)
++{
++	return !(pfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1));
++}
++
++static unsigned long cofunc_tdx_pages_for_level(enum pg_level level)
++{
++	if (level < PG_LEVEL_4K || level > KVM_MAX_HUGEPAGE_LEVEL)
++		return 0;
++	return KVM_PAGES_PER_HPAGE(level);
++}
++
+ /* make pte_list_desc fit well in cache lines */
+ #define PTE_LIST_EXT 14
+ 
+@@ -3420,6 +3451,8 @@
+ 	bool is_private = fault->is_private;
+ 	struct kvm_shadow_walk_iterator it;
+ 	struct kvm_mmu_page *sp;
++	u8 original_max_level = fault->max_level;
++	bool small_spte_block = false;
+ 	gfn_t base_gfn;
+ 
+ 	/*
+@@ -3431,8 +3464,10 @@
+ 		for_each_shadow_entry(vcpu, fault->addr, it) {
+ 			if (is_shadow_present_pte(*it.sptep)) {
+ 				if (!is_last_spte(*it.sptep, it.level) &&
+-					fault->max_level >= it.level)
++					fault->max_level >= it.level) {
++					small_spte_block = true;
+ 					fault->max_level = it.level - 1;
++				}
+ 			} else {
+ 				break;
+ 			}
+@@ -3440,6 +3475,17 @@
+ 	}
+ 
+ 	kvm_mmu_hugepage_adjust(vcpu, fault);
++	if (is_private &&
++	    cofunc_tdx_take_log_slot(&cofunc_tdx_private_adjust_log_budget))
++		pr_info("CoFunc old-ABI private fault level diagnostic: hugepage_adjust gfn=0x%llx pfn=0x%llx original_max=%u max=%u req=%u goal=%u host=%u host_pages=%lu disallowed=%d small_spte_block=%d gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++			(unsigned long long)fault->gfn,
++			(unsigned long long)fault->pfn,
++			original_max_level, fault->max_level, fault->req_level,
++			fault->goal_level, fault->host_level,
++			cofunc_tdx_pages_for_level(fault->host_level),
++			fault->huge_page_disallowed, small_spte_block,
++			cofunc_tdx_gfn_2m_aligned(fault->gfn),
++			cofunc_tdx_pfn_2m_aligned(fault->pfn));
+ 
+ 	trace_kvm_mmu_spte_requested(fault);
+ 	for_each_shadow_entry(vcpu, fault->addr, it) {
+@@ -3488,6 +3534,19 @@
+ 	}
+ 
+ 	__direct_populate_nonleaf(vcpu, fault, &it, &base_gfn);
++	if (is_private &&
++	    cofunc_tdx_take_log_slot(&cofunc_tdx_private_map_log_budget))
++		pr_info("CoFunc old-ABI private fault level diagnostic: direct_map gfn=0x%llx base_gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u walk_level=%d walk_pages=%lu shadow_present=%d gfn_2m_aligned=%d base_2m_aligned=%d pfn_2m_aligned=%d\n",
++			(unsigned long long)fault->gfn,
++			(unsigned long long)base_gfn,
++			(unsigned long long)fault->pfn,
++			fault->max_level, fault->req_level, fault->goal_level,
++			fault->host_level, it.level,
++			cofunc_tdx_pages_for_level(it.level),
++			is_shadow_present_pte(*it.sptep),
++			cofunc_tdx_gfn_2m_aligned(fault->gfn),
++			cofunc_tdx_gfn_2m_aligned(base_gfn),
++			cofunc_tdx_pfn_2m_aligned(fault->pfn));
+ 	/*
+ 	 * For private page, if spte is already present. It must be one large
+ 	 * page split into smaller page. In this case, split_private_spte() in
+@@ -4576,6 +4635,7 @@
+ {
+ 	int order;
+ 	struct kvm_memory_slot *slot = fault->slot;
++	u8 level;
+ 	bool private_exist = kvm_mem_is_private(vcpu->kvm, fault->gfn);
+ 
+ 	/*
+@@ -4590,9 +4650,19 @@
+ 	if (fault->is_private) {
+ 		if (kvm_private_mem_get_pfn(slot, fault->gfn, &fault->pfn, &order))
+ 			return RET_PF_RETRY;
+-		fault->max_level = min(order_to_level(order), fault->max_level);
++		level = order_to_level(order);
++		fault->max_level = min(level, fault->max_level);
+ 		fault->map_writable = !(slot->flags & KVM_MEM_READONLY);
+-		fault->host_level = order_to_level(order);
++		fault->host_level = level;
++		if (cofunc_tdx_take_log_slot(&cofunc_tdx_private_fault_log_budget))
++			pr_info("CoFunc old-ABI private fault level diagnostic: private_pfn gfn=0x%llx pfn=0x%llx order=%d host_level=%u max_level=%u pages=%lu gfn_2m_aligned=%d pfn_2m_aligned=%d private_exist=%d\n",
++				(unsigned long long)fault->gfn,
++				(unsigned long long)fault->pfn, order,
++				fault->host_level, fault->max_level,
++				cofunc_tdx_pages_for_level(fault->host_level),
++				cofunc_tdx_gfn_2m_aligned(fault->gfn),
++				cofunc_tdx_pfn_2m_aligned(fault->pfn),
++				private_exist);
+ 		return RET_PF_FIXED;
+ 	}
+ 
+diff -uNr base/arch/x86/kvm/vmx/tdx.c mod/arch/x86/kvm/vmx/tdx.c
+--- base/arch/x86/kvm/vmx/tdx.c	2026-07-01 06:14:50.830845482 +0000
++++ mod/arch/x86/kvm/vmx/tdx.c	2026-07-01 06:15:52.787337233 +0000
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/cpu.h>
++#include <linux/atomic.h>
+ #include <linux/kvm_para.h>
+ #include <linux/mmu_context.h>
+ #include <linux/misc_cgroup.h>
+@@ -51,6 +52,13 @@
+ static struct tdx_capabilities tdx_caps;
+ 
+ /*
++ * CoFunc old-ABI private fault level diagnostic: log only finalized TD private
++ * SEPT additions, avoiding the build-time KVM_TDX_INIT_MEM_REGION path.
++ */
++static atomic_t cofunc_tdx_sept_log_budget = ATOMIC_INIT(96);
++#define COFUNC_TDX_2M_PAGES KVM_PAGES_PER_HPAGE(PG_LEVEL_2M)
++
++/*
+  * Some TDX SEAMCALLs (TDH.MNG.CREATE, TDH.PHYMEM.CACHE.WB,
+  * TDH.MNG.KEY.RECLAIMID, TDH.MNG.KEY.FREEID etc) tries to acquire a global lock
+  * internally in TDX module.  If failed, TDX_OPERAND_BUSY is returned without
+@@ -1911,6 +1919,13 @@
+ 
+ 	/* Build-time faults are induced and handled via TDH_MEM_PAGE_ADD. */
+ 	if (likely(is_td_finalized(kvm_tdx))) {
++		if (atomic_dec_if_positive(&cofunc_tdx_sept_log_budget) >= 0)
++			pr_info("CoFunc old-ABI private fault level diagnostic: set_private_spte gfn=0x%llx pfn=0x%llx level=%d pages=%lu tdx_level=%d gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++				(unsigned long long)gfn,
++				(unsigned long long)pfn,
++				level, KVM_PAGES_PER_HPAGE(level), tdx_level,
++				!(gfn & (COFUNC_TDX_2M_PAGES - 1)),
++				!(pfn & (COFUNC_TDX_2M_PAGES - 1)));
+ 		err = tdh_mem_page_aug(kvm_tdx->tdr.pa, gpa, tdx_level, hpa, &out);
+ 		if (KVM_BUG_ON(err, kvm)) {
+ 			pr_tdx_error(TDH_MEM_PAGE_AUG, err, &out);

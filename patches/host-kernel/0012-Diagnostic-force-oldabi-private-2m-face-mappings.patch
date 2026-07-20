@@ -1,0 +1,82 @@
+From 4a2d5f4b4d1b2a94b95c2fd5abf72efb2d7a0012 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Thu, 2 Jul 2026 09:18:00 +0000
+Subject: [PATCH] KVM: Diagnostic force old-ABI private face mappings to 2M
+
+0011 showed that the old-ABI face runtime grant faults are private,
+2M-aligned TDP faults, but KVM lowers req_level to 4K because the old-ABI
+slot is not marked private and host_pfn_mapping_level() reports a 4K HVA
+mapping.  The lpage disallow bits, dirty tracking, GFN alignment, and PFN
+alignment are not the limiting factors.
+
+As a narrow diagnostic, force req_level back to 2M only for face-range private
+faults that are 2M GFN-aligned, 2M PFN-aligned, not lpage-disallowed, and
+backed by a compound page of at least 2M order.  This tests whether the guest's
+2M accepts stop rejecting when KVM installs a 2M private TDP leaf.
+---
+ arch/x86/kvm/mmu/mmu.c | 40 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+--- a/arch/x86/kvm/mmu/mmu.c
++++ b/arch/x86/kvm/mmu/mmu.c
+@@ -3303,6 +3303,11 @@ static unsigned long cofunc_tdx_hp_pages_for_level(int level)
+ 	return KVM_PAGES_PER_HPAGE(level);
+ }
+ 
++static int cofunc_tdx_hp_pfn_order(kvm_pfn_t pfn)
++{
++	return compound_order(compound_head(pfn_to_page(pfn)));
++}
++
+ static int __kvm_mmu_max_mapping_level(struct kvm *kvm,
+ 				       const struct kvm_memory_slot *slot,
+ 				       gfn_t gfn, int max_level, int host_level)
+@@ -3380,6 +3385,7 @@ void kvm_mmu_hugepage_adjust(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
+ {
+ 	struct kvm_memory_slot *slot = fault->slot;
+ 	kvm_pfn_t mask;
++	int pfn_order = 0;
+ 	bool log_diag = cofunc_tdx_hp_diag_should_log(fault->gfn,
+ 						      &cofunc_tdx_hp_adjust_log_budget);
+ 
+@@ -3433,6 +3439,40 @@ void kvm_mmu_hugepage_adjust(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
+ 	fault->req_level = __kvm_mmu_max_mapping_level(vcpu->kvm, slot,
+ 						       fault->gfn, fault->max_level,
+ 						       fault->host_level);
++	if (fault->is_private &&
++	    fault->req_level == PG_LEVEL_4K &&
++	    fault->max_level >= PG_LEVEL_2M &&
++	    !fault->huge_page_disallowed &&
++	    slot && !kvm_slot_can_be_private(slot) &&
++	    fault->gfn >= COFUNC_TDX_HP_DIAG_MIN_GFN &&
++	    fault->gfn < COFUNC_TDX_HP_DIAG_MAX_GFN &&
++	    !(fault->gfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1)) &&
++	    !(fault->pfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1)) &&
++	    !cofunc_tdx_hp_lpage_disallow(fault->gfn, slot, PG_LEVEL_2M)) {
++		pfn_order = cofunc_tdx_hp_pfn_order(fault->pfn);
++		if (pfn_order >= KVM_HPAGE_GFN_SHIFT(PG_LEVEL_2M)) {
++			pr_info("CoFunc old-ABI force private 2M diagnostic: override private=%d gfn=0x%llx pfn=0x%llx max=%u old_req=%u new_req=%u host=%u pfn_order=%d slot_private=%d slot_flags=0x%lx hva=0x%lx\n",
++				fault->is_private,
++				(unsigned long long)fault->gfn,
++				(unsigned long long)fault->pfn,
++				fault->max_level, fault->req_level,
++				PG_LEVEL_2M, fault->host_level, pfn_order,
++				slot && kvm_slot_can_be_private(slot),
++				slot ? (unsigned long)slot->flags : 0,
++				(unsigned long)fault->hva);
++			fault->req_level = PG_LEVEL_2M;
++		} else if (log_diag) {
++			pr_info("CoFunc old-ABI force private 2M diagnostic: no_override reason=pfn_order private=%d gfn=0x%llx pfn=0x%llx max=%u req=%u host=%u pfn_order=%d slot_private=%d slot_flags=0x%lx hva=0x%lx\n",
++				fault->is_private,
++				(unsigned long long)fault->gfn,
++				(unsigned long long)fault->pfn,
++				fault->max_level, fault->req_level,
++				fault->host_level, pfn_order,
++				slot && kvm_slot_can_be_private(slot),
++				slot ? (unsigned long)slot->flags : 0,
++				(unsigned long)fault->hva);
++		}
++	}
+ 	if (log_diag)
+ 		pr_info("CoFunc old-ABI face-GFN hugepage decision diagnostic: hp_adjust_result private=%d gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u req_pages=%lu slot_private=%d slot_flags=0x%lx hva=0x%lx disallowed=%d l2_disallow=0x%lx\n",
+ 			fault->is_private,

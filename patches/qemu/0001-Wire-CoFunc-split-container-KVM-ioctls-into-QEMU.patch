@@ -1,0 +1,193 @@
+From 22f38131a25b9e24e5d89fdb34ac1c83049becfb Mon Sep 17 00:00:00 2001
+From: JaehyeonLee <ljhhasang@gmail.com>
+Date: Wed, 10 Jun 2026 07:32:04 +0000
+Subject: [PATCH] Wire CoFunc split-container KVM ioctls into QEMU
+
+---
+ accel/kvm/kvm-all.c       |  6 ++++++
+ include/split-container.h | 11 +++++++++++
+ target/i386/kvm/kvm.c     | 22 ++++++++++++++++++++--
+ target/i386/kvm/tdx.c     | 31 +++++++++++++++++++++++++++++++
+ 4 files changed, 68 insertions(+), 2 deletions(-)
+ create mode 100644 include/split-container.h
+
+diff --git a/accel/kvm/kvm-all.c b/accel/kvm/kvm-all.c
+index 28006d73..3669c54e 100644
+--- a/accel/kvm/kvm-all.c
++++ b/accel/kvm/kvm-all.c
+@@ -55,6 +55,7 @@
+ 
+ #include "hw/boards.h"
+ #include "system/stats.h"
++#include "split-container.h"
+ 
+ /* This check must be after config-host.h is included */
+ #ifdef CONFIG_EVENTFD
+@@ -2509,8 +2510,13 @@ uint32_t kvm_dirty_ring_size(void)
+ 
+ static int do_kvm_create_vm(KVMState *s, int type)
+ {
++    const char *env_slot_id = getenv("SLOT_ID");
+     int ret;
+ 
++    if (env_slot_id && *env_slot_id) {
++        type |= KVM_VM_TYPE_SC_SLOT(strtoul(env_slot_id, NULL, 0));
++    }
++
+     do {
+         ret = kvm_ioctl(s, KVM_CREATE_VM, type);
+     } while (ret == -EINTR);
+diff --git a/include/split-container.h b/include/split-container.h
+new file mode 100644
+index 00000000..662d50c4
+--- /dev/null
++++ b/include/split-container.h
+@@ -0,0 +1,11 @@
++#pragma once
++
++#define KVM_VM_TYPE_SC_MASK		0xff000000U
++#define KVM_VM_TYPE_SC_SLOT(slot)	((((slot) + 1) & 0xff) << 24)
++
++#define KVM_HC_SC_VCPU_IDLE		100
++#define KVM_HC_SC_REQUEST		101
++#define KVM_HC_TDX_SC_VCPU_IDLE		0x10010
++#define KVM_HC_TDX_SC_REQUEST		0x10011
++
++#define SC_REQ_DEBUG_PUTC		1
+diff --git a/target/i386/kvm/kvm.c b/target/i386/kvm/kvm.c
+index 60c79811..2942c024 100644
+--- a/target/i386/kvm/kvm.c
++++ b/target/i386/kvm/kvm.c
+@@ -46,6 +46,7 @@
+ #include "gdbstub/enums.h"
+ #include "qemu/host-utils.h"
+ #include "qemu/main-loop.h"
++#include "qemu/thread.h"
+ #include "qemu/ratelimit.h"
+ #include "qemu/config-file.h"
+ #include "qemu/error-report.h"
+@@ -68,6 +69,7 @@
+ #include "hw/pci/msix.h"
+ #include "migration/blocker.h"
+ #include "exec/memattrs.h"
++#include "split-container.h"
+ #include "exec/target_page.h"
+ #include "trace.h"
+ 
+@@ -6083,10 +6085,26 @@ static int kvm_handle_hc_map_gpa_range(X86CPU *cpu, struct kvm_run *run)
+ 
+ static int kvm_handle_hypercall(X86CPU *cpu, struct kvm_run *run)
+ {
+-    if (run->hypercall.nr == KVM_HC_MAP_GPA_RANGE)
++    switch (run->hypercall.nr) {
++    case KVM_HC_MAP_GPA_RANGE:
+         return kvm_handle_hc_map_gpa_range(cpu, run);
++    case KVM_HC_SC_VCPU_IDLE:
++    case KVM_HC_TDX_SC_VCPU_IDLE:
++        qemu_thread_exit(NULL);
++        return 0;
++    case KVM_HC_SC_REQUEST:
++    case KVM_HC_TDX_SC_REQUEST:
++        if (run->hypercall.args[0] != SC_REQ_DEBUG_PUTC) {
++            return -EINVAL;
++        }
++        putchar(run->hypercall.args[1]);
++        fflush(stdout);
++        run->hypercall.ret = 0;
++        return 0;
++    default:
++        return -EINVAL;
++    }
+ 
+-    return -EINVAL;
+ }
+ 
+ #define VMX_INVALID_GUEST_STATE 0x80000021
+diff --git a/target/i386/kvm/tdx.c b/target/i386/kvm/tdx.c
+index dbf0fa2c..2d07bbee 100644
+--- a/target/i386/kvm/tdx.c
++++ b/target/i386/kvm/tdx.c
+@@ -66,6 +66,20 @@ static TdxGuest *tdx_guest;
+ static struct kvm_tdx_capabilities *tdx_caps;
+ static struct kvm_cpuid2 *tdx_supported_cpuid;
+ 
++static bool cofunc_tdx_debug_enabled(void)
++{
++    const char *env = getenv("COFUNC_TDX_DEBUG");
++
++    return env && *env && g_strcmp0(env, "0");
++}
++
++#define COFUNC_TDX_DEBUG(fmt, ...)                                      \
++    do {                                                               \
++        if (cofunc_tdx_debug_enabled()) {                              \
++            error_report("[cofunc-tdx] " fmt, ## __VA_ARGS__);         \
++        }                                                              \
++    } while (0)
++
+ /* Valid after kvm_arch_init()->confidential_guest_kvm_init()->tdx_kvm_init() */
+ bool is_tdx_vm(void)
+ {
+@@ -290,6 +304,8 @@ static void tdx_post_init_vcpus(void)
+ 
+     hob = tdx_get_hob_entry(tdx_guest);
+     CPU_FOREACH(cpu) {
++        COFUNC_TDX_DEBUG("KVM_TDX_INIT_VCPU cpu_index=%d hob_gpa=0x%"PRIx64,
++                         cpu->cpu_index, hob->address);
+         tdx_vcpu_ioctl(cpu, KVM_TDX_INIT_VCPU, 0, (void *)(uintptr_t)hob->address,
+                        &error_fatal);
+     }
+@@ -303,6 +319,7 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
+     Error *local_err = NULL;
+     int r;
+ 
++    COFUNC_TDX_DEBUG("finalize begin");
+     tdx_init_ram_entries();
+ 
+     for_each_tdx_fw_entry(tdvf, entry) {
+@@ -331,6 +348,10 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
+             error_report("Unsupported TDVF section %d", entry->type);
+             exit(1);
+         }
++        COFUNC_TDX_DEBUG("TDVF section type=%u attr=0x%x gpa=0x%"PRIx64
++                         " size=0x%"PRIx64" data_len=0x%x source=%p",
++                         entry->type, entry->attributes, entry->address,
++                         entry->size, entry->data_len, entry->mem_ptr);
+     }
+ 
+     qsort(tdx_guest->ram_entries, tdx_guest->nr_ram_entries,
+@@ -352,6 +373,10 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
+ 
+         flags = entry->attributes & TDVF_SECTION_ATTRIBUTES_MR_EXTEND ?
+                 KVM_TDX_MEASURE_MEMORY_REGION : 0;
++        COFUNC_TDX_DEBUG("KVM_TDX_INIT_MEM_REGION begin type=%u gpa=0x%"PRIx64
++                         " pages=0x%"PRIx64" flags=0x%x",
++                         entry->type, (uint64_t)region.gpa,
++                         (uint64_t)region.nr_pages, flags);
+ 
+         do {
+             error_free(local_err);
+@@ -363,6 +388,10 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
+             error_report_err(local_err);
+             exit(1);
+         }
++        COFUNC_TDX_DEBUG("KVM_TDX_INIT_MEM_REGION done type=%u next_gpa=0x%"PRIx64
++                         " remaining_pages=0x%"PRIx64,
++                         entry->type, (uint64_t)region.gpa,
++                         (uint64_t)region.nr_pages);
+ 
+         if (entry->type == TDVF_SECTION_TYPE_TD_HOB ||
+             entry->type == TDVF_SECTION_TYPE_TEMP_MEM) {
+@@ -378,7 +407,9 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
+     ram_block = tdx_guest->tdvf_mr->ram_block;
+     ram_block_discard_range(ram_block, 0, ram_block->max_length);
+ 
++    COFUNC_TDX_DEBUG("KVM_TDX_FINALIZE_VM begin");
+     tdx_vm_ioctl(KVM_TDX_FINALIZE_VM, 0, NULL, &error_fatal);
++    COFUNC_TDX_DEBUG("KVM_TDX_FINALIZE_VM done");
+     CONFIDENTIAL_GUEST_SUPPORT(tdx_guest)->ready = true;
+ }
+ 
+-- 
+2.34.1
+

@@ -1,0 +1,12 @@
+--- a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
++++ b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
+@@ -98,6 +98,8 @@ EXPORT(_start)
+ 	movl $PADDR(stack+KSTACKSIZE), %esp
+ 	pushq %rdi
+ 	pushq %rsi
+ 	TDX_BOOT_PUTC 91
++cofunc_single_putc_ud2:
++	ud2
+ 	TDX_BOOT_PUTC 65
+ 	TDX_BOOT_PUTC 83
+ 	TDX_BOOT_PUTC 77

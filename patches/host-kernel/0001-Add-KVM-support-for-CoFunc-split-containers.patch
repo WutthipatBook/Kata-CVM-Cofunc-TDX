@@ -1,0 +1,1215 @@
+From 42570b02b50609157153372f11ad4967577e9358 Mon Sep 17 00:00:00 2001
+From: JaehyeonLee <ljhhasang@gmail.com>
+Date: Wed, 10 Jun 2026 07:31:33 +0000
+Subject: [PATCH] Add KVM support for CoFunc split containers
+
+---
+ arch/x86/kvm/Makefile         |   2 +-
+ arch/x86/kvm/vmx/tdx.c        |  31 ++-
+ arch/x86/kvm/x86.c            |  25 ++
+ include/linux/kvm_host.h      |   7 +
+ include/uapi/linux/kvm.h      |   2 +
+ include/uapi/linux/kvm_para.h |   4 +
+ virt/kvm/Makefile.kvm         |   3 +-
+ virt/kvm/kvm_main.c           | 467 +++++++++++++++++++++++++++++++---
+ virt/kvm/kvm_mm.h             |   7 +
+ virt/kvm/split_container.c    |  96 +++++++
+ virt/kvm/split_container.h    |  19 ++
+ 11 files changed, 612 insertions(+), 51 deletions(-)
+ create mode 100644 virt/kvm/split_container.c
+ create mode 100644 virt/kvm/split_container.h
+
+diff --git a/arch/x86/kvm/Makefile b/arch/x86/kvm/Makefile
+index c4b8950c7..da41202a3 100644
+--- a/arch/x86/kvm/Makefile
++++ b/arch/x86/kvm/Makefile
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0
+ 
+-ccflags-y += -I $(srctree)/arch/x86/kvm
++ccflags-y += -I $(srctree)/arch/x86/kvm -I $(srctree)/virt/kvm
+ ccflags-$(CONFIG_KVM_WERROR) += -Werror
+ 
+ include $(srctree)/virt/kvm/Makefile.kvm
+diff --git a/arch/x86/kvm/vmx/tdx.c b/arch/x86/kvm/vmx/tdx.c
+index 2d7a4d52c..c3d0adab9 100644
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -4,6 +4,7 @@
+ #include <asm/cpufeature.h>
+ #include <asm/fpu/xcr.h>
+ #include <linux/misc_cgroup.h>
++#include <linux/kvm_para.h>
+ #include <linux/mmu_context.h>
+ #include <asm/tdx.h>
+ #include "capabilities.h"
+@@ -656,17 +657,14 @@ int tdx_vm_init(struct kvm *kvm)
+ 	kvm_mmu_set_mmio_spte_value(kvm, 0);
+ 
+ 	/*
+-	 * TDX has its own limit of maximum vCPUs it can support for all
+-	 * TDX guests in addition to KVM_MAX_VCPUS.  TDX module reports
+-	 * such limit via the MAX_VCPU_PER_TD global metadata.  In
+-	 * practice, it reflects the number of logical CPUs that ALL
+-	 * platforms that the TDX module supports can possibly have.
+-	 *
+-	 * Limit TDX guest's maximum vCPUs to the number of logical CPUs
+-	 * the platform has.  Simply forwarding the MAX_VCPU_PER_TD to
+-	 * userspace would result in an unpredictable ABI.
++	 * CoFunc keeps a large pool of idle source-CVM vCPUs.  The pool can be
++	 * larger than the host's physical CPU count because those vCPUs block in
++	 * KVM until a clone is assigned.  Advertising num_present_cpus() as the
++	 * hard TDX limit makes the original 128-vCPU workflow fail in QEMU before
++	 * the guest even boots, so use the TDX module's real per-TD limit instead.
+ 	 */
+-	kvm->max_vcpus = min_t(int, kvm->max_vcpus, num_present_cpus());
++	kvm->max_vcpus = min_t(int, kvm->max_vcpus,
++			      tdx_sysinfo->td_conf.max_vcpus_per_td);
+ 
+ 	kvm_tdx->state = TD_STATE_UNINITIALIZED;
+ 
+@@ -1161,7 +1159,18 @@ static int tdx_handle_exception_nmi(struct kvm_vcpu *vcpu)
+ 
+ static int complete_hypercall_exit(struct kvm_vcpu *vcpu)
+ {
+-	tdvmcall_set_return_code(vcpu, vcpu->run->hypercall.ret);
++	switch (vcpu->run->hypercall.nr) {
++	case KVM_HC_SC_VCPU_IDLE:
++	case KVM_HC_TDX_SC_VCPU_IDLE:
++	case KVM_HC_SC_REQUEST:
++	case KVM_HC_TDX_SC_REQUEST:
++		tdvmcall_set_return_code(vcpu, 0);
++		tdvmcall_set_return_val(vcpu, vcpu->run->hypercall.ret);
++		break;
++	default:
++		tdvmcall_set_return_code(vcpu, vcpu->run->hypercall.ret);
++		break;
++	}
+ 	return 1;
+ }
+ 
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 63afdb6bb..18367164c 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -33,6 +33,7 @@
+ #include "lapic.h"
+ #include "xen.h"
+ #include "smm.h"
++#include "split_container.h"
+ 
+ #include <linux/clocksource.h>
+ #include <linux/interrupt.h>
+@@ -10438,6 +10439,30 @@ int ____kvm_emulate_hypercall(struct kvm_vcpu *vcpu, int cpl,
+ 		vcpu->arch.complete_userspace_io = complete_hypercall;
+ 		return 0;
+ 	}
++	case KVM_HC_SC_VCPU_IDLE:
++	case KVM_HC_TDX_SC_VCPU_IDLE:
++		split_container_vcpu_idle(vcpu);
++		vcpu->run->exit_reason        = KVM_EXIT_HYPERCALL;
++		vcpu->run->hypercall.nr       = nr;
++		vcpu->run->hypercall.ret      = 0;
++		vcpu->run->hypercall.flags    = 0;
++		if (op_64_bit)
++			vcpu->run->hypercall.flags |= KVM_EXIT_HYPERCALL_LONG_MODE;
++		vcpu->arch.complete_userspace_io = complete_hypercall;
++		return 0;
++	case KVM_HC_SC_REQUEST:
++	case KVM_HC_TDX_SC_REQUEST:
++		vcpu->run->exit_reason        = KVM_EXIT_HYPERCALL;
++		vcpu->run->hypercall.nr       = nr;
++		vcpu->run->hypercall.ret      = 0;
++		vcpu->run->hypercall.args[0]  = a0;
++		vcpu->run->hypercall.args[1]  = a1;
++		vcpu->run->hypercall.args[2]  = a2;
++		vcpu->run->hypercall.flags    = 0;
++		if (op_64_bit)
++			vcpu->run->hypercall.flags |= KVM_EXIT_HYPERCALL_LONG_MODE;
++		vcpu->arch.complete_userspace_io = complete_hypercall;
++		return 0;
+ 	default:
+ 		ret = -KVM_ENOSYS;
+ 		break;
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index d93f75b05..a1e233526 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -351,6 +351,8 @@ struct kvm_vcpu {
+ 	sigset_t sigset;
+ 	unsigned int halt_poll_ns;
+ 	bool valid_wakeup;
++	bool sc_idle;
++	struct list_head sc_idle_node;
+ 
+ #ifdef CONFIG_HAS_IOMEM
+ 	int mmio_needed;
+@@ -600,6 +602,7 @@ struct kvm_memory_slot {
+ 	unsigned long *dirty_bitmap;
+ 	struct kvm_arch_memory_slot arch;
+ 	unsigned long userspace_addr;
++	struct mm_struct *userspace_mm;
+ 	u32 flags;
+ 	short id;
+ 	u16 as_id;
+@@ -817,6 +820,10 @@ struct kvm {
+ 	int last_boosted_vcpu;
+ 	struct list_head vm_list;
+ 	struct mutex lock;
++	spinlock_t sc_idle_vcpus_lock;
++	struct list_head sc_idle_vcpus;
++	struct mutex sc_mmu_notifiers_lock;
++	struct list_head sc_mmu_notifiers;
+ 	struct kvm_io_bus __rcu *buses[KVM_NR_BUSES];
+ #ifdef CONFIG_HAVE_KVM_IRQCHIP
+ 	struct {
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index dddb781b0..ad83f248d 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -709,6 +709,8 @@ struct kvm_enable_cap {
+ #define KVM_GET_SUPPORTED_CPUID   _IOWR(KVMIO, 0x05, struct kvm_cpuid2)
+ #define KVM_GET_EMULATED_CPUID	  _IOWR(KVMIO, 0x09, struct kvm_cpuid2)
+ #define KVM_GET_MSR_FEATURE_INDEX_LIST    _IOWR(KVMIO, 0x0a, struct kvm_msr_list)
++#define KVM_SC_GET_VM		  _IO(KVMIO,   0x10)
++#define KVM_SC_ALLOC_VCPU	  _IO(KVMIO,   0x11)
+ 
+ /*
+  * Extension capability list.
+diff --git a/include/uapi/linux/kvm_para.h b/include/uapi/linux/kvm_para.h
+index 960c7e93d..8c5593d7b 100644
+--- a/include/uapi/linux/kvm_para.h
++++ b/include/uapi/linux/kvm_para.h
+@@ -30,6 +30,10 @@
+ #define KVM_HC_SEND_IPI		10
+ #define KVM_HC_SCHED_YIELD		11
+ #define KVM_HC_MAP_GPA_RANGE		12
++#define KVM_HC_SC_VCPU_IDLE		100
++#define KVM_HC_SC_REQUEST		101
++#define KVM_HC_TDX_SC_VCPU_IDLE		0x10010
++#define KVM_HC_TDX_SC_REQUEST		0x10011
+ 
+ /*
+  * hypercalls use architecture specific
+diff --git a/virt/kvm/Makefile.kvm b/virt/kvm/Makefile.kvm
+index d047d4cf5..3352d38f2 100644
+--- a/virt/kvm/Makefile.kvm
++++ b/virt/kvm/Makefile.kvm
+@@ -5,7 +5,8 @@
+ 
+ KVM ?= ../../../virt/kvm
+ 
+-kvm-y := $(KVM)/kvm_main.o $(KVM)/eventfd.o $(KVM)/binary_stats.o
++kvm-y := $(KVM)/kvm_main.o $(KVM)/eventfd.o $(KVM)/binary_stats.o \
++	 $(KVM)/split_container.o
+ kvm-$(CONFIG_KVM_VFIO) += $(KVM)/vfio.o
+ kvm-$(CONFIG_KVM_MMIO) += $(KVM)/coalesced_mmio.o
+ kvm-$(CONFIG_KVM_ASYNC_PF) += $(KVM)/async_pf.o
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 5b5b69c97..e4b95f180 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -59,6 +59,7 @@
+ #include "async_pf.h"
+ #include "kvm_mm.h"
+ #include "vfio.h"
++#include "split_container.h"
+ 
+ #include <trace/events/ipi.h>
+ 
+@@ -503,11 +504,30 @@ void kvm_destroy_vcpus(struct kvm *kvm)
+ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_destroy_vcpus);
+ 
+ #ifdef CONFIG_KVM_GENERIC_MMU_NOTIFIER
++struct kvm_sc_mmu_notifier {
++	struct mmu_notifier notifier;
++	struct kvm *kvm;
++	struct mm_struct *mm;
++	struct list_head node;
++};
++
+ static inline struct kvm *mmu_notifier_to_kvm(struct mmu_notifier *mn)
+ {
+ 	return container_of(mn, struct kvm, mmu_notifier);
+ }
+ 
++static inline struct kvm_sc_mmu_notifier *
++mmu_notifier_to_sc_mn(struct mmu_notifier *mn)
++{
++	return container_of(mn, struct kvm_sc_mmu_notifier, notifier);
++}
++
++static struct mm_struct *kvm_slot_owner_mm(struct kvm *kvm,
++					   const struct kvm_memory_slot *slot)
++{
++	return slot && slot->userspace_mm ? slot->userspace_mm : kvm->mm;
++}
++
+ typedef bool (*gfn_handler_t)(struct kvm *kvm, struct kvm_gfn_range *range);
+ 
+ typedef void (*on_lock_fn_t)(struct kvm *kvm);
+@@ -520,6 +540,7 @@ struct kvm_mmu_notifier_range {
+ 	u64 start;
+ 	u64 end;
+ 	union kvm_mmu_notifier_arg arg;
++	struct mm_struct *mm;
+ 	gfn_handler_t handler;
+ 	on_lock_fn_t on_lock;
+ 	bool flush_on_ret;
+@@ -594,6 +615,9 @@ static __always_inline kvm_mn_ret_t kvm_handle_hva_range(struct kvm *kvm,
+ 			unsigned long hva_start, hva_end;
+ 
+ 			slot = container_of(node, struct kvm_memory_slot, hva_node[slots->node_idx]);
++			if (range->mm && kvm_slot_owner_mm(kvm, slot) != range->mm)
++				continue;
++
+ 			hva_start = max_t(unsigned long, range->start, slot->userspace_addr);
+ 			hva_end = min_t(unsigned long, range->end,
+ 					slot->userspace_addr + (slot->npages << PAGE_SHIFT));
+@@ -648,16 +672,17 @@ static __always_inline kvm_mn_ret_t kvm_handle_hva_range(struct kvm *kvm,
+ 	return r;
+ }
+ 
+-static __always_inline int kvm_age_hva_range(struct mmu_notifier *mn,
+-						unsigned long start,
+-						unsigned long end,
+-						gfn_handler_t handler,
+-						bool flush_on_ret)
++static __always_inline int __kvm_age_hva_range(struct kvm *kvm,
++					       struct mm_struct *mm,
++					       unsigned long start,
++					       unsigned long end,
++					       gfn_handler_t handler,
++					       bool flush_on_ret)
+ {
+-	struct kvm *kvm = mmu_notifier_to_kvm(mn);
+ 	const struct kvm_mmu_notifier_range range = {
+ 		.start		= start,
+ 		.end		= end,
++		.mm		= mm,
+ 		.handler	= handler,
+ 		.on_lock	= (void *)kvm_null_fn,
+ 		.flush_on_ret	= flush_on_ret,
+@@ -668,12 +693,24 @@ static __always_inline int kvm_age_hva_range(struct mmu_notifier *mn,
+ 	return kvm_handle_hva_range(kvm, &range).ret;
+ }
+ 
++static __always_inline int kvm_age_hva_range(struct mmu_notifier *mn,
++					     struct mm_struct *mm,
++					     unsigned long start,
++					     unsigned long end,
++					     gfn_handler_t handler,
++					     bool flush_on_ret)
++{
++	return __kvm_age_hva_range(mmu_notifier_to_kvm(mn), mm, start, end,
++				   handler, flush_on_ret);
++}
++
+ static __always_inline int kvm_age_hva_range_no_flush(struct mmu_notifier *mn,
++						      struct mm_struct *mm,
+ 						      unsigned long start,
+ 						      unsigned long end,
+ 						      gfn_handler_t handler)
+ {
+-	return kvm_age_hva_range(mn, start, end, handler, false);
++	return kvm_age_hva_range(mn, mm, start, end, handler, false);
+ }
+ 
+ void kvm_mmu_invalidate_begin(struct kvm *kvm)
+@@ -724,13 +761,14 @@ bool kvm_mmu_unmap_gfn_range(struct kvm *kvm, struct kvm_gfn_range *range)
+ 	return kvm_unmap_gfn_range(kvm, range);
+ }
+ 
+-static int kvm_mmu_notifier_invalidate_range_start(struct mmu_notifier *mn,
++static int __kvm_mmu_notifier_invalidate_range_start(struct kvm *kvm,
++					struct mm_struct *mm,
+ 					const struct mmu_notifier_range *range)
+ {
+-	struct kvm *kvm = mmu_notifier_to_kvm(mn);
+ 	const struct kvm_mmu_notifier_range hva_range = {
+ 		.start		= range->start,
+ 		.end		= range->end,
++		.mm		= mm,
+ 		.handler	= kvm_mmu_unmap_gfn_range,
+ 		.on_lock	= kvm_mmu_invalidate_begin,
+ 		.flush_on_ret	= true,
+@@ -774,6 +812,13 @@ static int kvm_mmu_notifier_invalidate_range_start(struct mmu_notifier *mn,
+ 	return 0;
+ }
+ 
++static int kvm_mmu_notifier_invalidate_range_start(struct mmu_notifier *mn,
++					const struct mmu_notifier_range *range)
++{
++	return __kvm_mmu_notifier_invalidate_range_start(mmu_notifier_to_kvm(mn),
++							range->mm, range);
++}
++
+ void kvm_mmu_invalidate_end(struct kvm *kvm)
+ {
+ 	lockdep_assert_held_write(&kvm->mmu_lock);
+@@ -800,13 +845,14 @@ void kvm_mmu_invalidate_end(struct kvm *kvm)
+ 	WARN_ON_ONCE(kvm->mmu_invalidate_range_start == INVALID_GPA);
+ }
+ 
+-static void kvm_mmu_notifier_invalidate_range_end(struct mmu_notifier *mn,
++static void __kvm_mmu_notifier_invalidate_range_end(struct kvm *kvm,
++					struct mm_struct *mm,
+ 					const struct mmu_notifier_range *range)
+ {
+-	struct kvm *kvm = mmu_notifier_to_kvm(mn);
+ 	const struct kvm_mmu_notifier_range hva_range = {
+ 		.start		= range->start,
+ 		.end		= range->end,
++		.mm		= mm,
+ 		.handler	= (void *)kvm_null_fn,
+ 		.on_lock	= kvm_mmu_invalidate_end,
+ 		.flush_on_ret	= false,
+@@ -831,6 +877,13 @@ static void kvm_mmu_notifier_invalidate_range_end(struct mmu_notifier *mn,
+ 		rcuwait_wake_up(&kvm->mn_memslots_update_rcuwait);
+ }
+ 
++static void kvm_mmu_notifier_invalidate_range_end(struct mmu_notifier *mn,
++					const struct mmu_notifier_range *range)
++{
++	__kvm_mmu_notifier_invalidate_range_end(mmu_notifier_to_kvm(mn),
++						range->mm, range);
++}
++
+ static int kvm_mmu_notifier_clear_flush_young(struct mmu_notifier *mn,
+ 					      struct mm_struct *mm,
+ 					      unsigned long start,
+@@ -838,7 +891,7 @@ static int kvm_mmu_notifier_clear_flush_young(struct mmu_notifier *mn,
+ {
+ 	trace_kvm_age_hva(start, end);
+ 
+-	return kvm_age_hva_range(mn, start, end, kvm_age_gfn,
++	return kvm_age_hva_range(mn, mm, start, end, kvm_age_gfn,
+ 				 !IS_ENABLED(CONFIG_KVM_ELIDE_TLB_FLUSH_IF_YOUNG));
+ }
+ 
+@@ -862,7 +915,7 @@ static int kvm_mmu_notifier_clear_young(struct mmu_notifier *mn,
+ 	 * cadence. If we find this inaccurate, we might come up with a
+ 	 * more sophisticated heuristic later.
+ 	 */
+-	return kvm_age_hva_range_no_flush(mn, start, end, kvm_age_gfn);
++	return kvm_age_hva_range_no_flush(mn, mm, start, end, kvm_age_gfn);
+ }
+ 
+ static int kvm_mmu_notifier_test_young(struct mmu_notifier *mn,
+@@ -871,14 +924,12 @@ static int kvm_mmu_notifier_test_young(struct mmu_notifier *mn,
+ {
+ 	trace_kvm_test_age_hva(address);
+ 
+-	return kvm_age_hva_range_no_flush(mn, address, address + 1,
++	return kvm_age_hva_range_no_flush(mn, mm, address, address + 1,
+ 					  kvm_test_age_gfn);
+ }
+ 
+-static void kvm_mmu_notifier_release(struct mmu_notifier *mn,
+-				     struct mm_struct *mm)
++static void __kvm_mmu_notifier_release(struct kvm *kvm)
+ {
+-	struct kvm *kvm = mmu_notifier_to_kvm(mn);
+ 	int idx;
+ 
+ 	idx = srcu_read_lock(&kvm->srcu);
+@@ -886,6 +937,76 @@ static void kvm_mmu_notifier_release(struct mmu_notifier *mn,
+ 	srcu_read_unlock(&kvm->srcu, idx);
+ }
+ 
++static void kvm_mmu_notifier_release(struct mmu_notifier *mn,
++				     struct mm_struct *mm)
++{
++	__kvm_mmu_notifier_release(mmu_notifier_to_kvm(mn));
++}
++
++static int kvm_sc_mmu_notifier_invalidate_range_start(struct mmu_notifier *mn,
++					const struct mmu_notifier_range *range)
++{
++	struct kvm_sc_mmu_notifier *sc_mn = mmu_notifier_to_sc_mn(mn);
++
++	return __kvm_mmu_notifier_invalidate_range_start(sc_mn->kvm,
++							sc_mn->mm, range);
++}
++
++static void kvm_sc_mmu_notifier_invalidate_range_end(struct mmu_notifier *mn,
++					const struct mmu_notifier_range *range)
++{
++	struct kvm_sc_mmu_notifier *sc_mn = mmu_notifier_to_sc_mn(mn);
++
++	__kvm_mmu_notifier_invalidate_range_end(sc_mn->kvm, sc_mn->mm, range);
++}
++
++static int kvm_sc_mmu_notifier_clear_flush_young(struct mmu_notifier *mn,
++						 struct mm_struct *mm,
++						 unsigned long start,
++						 unsigned long end)
++{
++	struct kvm_sc_mmu_notifier *sc_mn = mmu_notifier_to_sc_mn(mn);
++
++	trace_kvm_age_hva(start, end);
++
++	return __kvm_age_hva_range(sc_mn->kvm, sc_mn->mm, start, end,
++				   kvm_age_gfn,
++				   !IS_ENABLED(CONFIG_KVM_ELIDE_TLB_FLUSH_IF_YOUNG));
++}
++
++static int kvm_sc_mmu_notifier_clear_young(struct mmu_notifier *mn,
++					   struct mm_struct *mm,
++					   unsigned long start,
++					   unsigned long end)
++{
++	struct kvm_sc_mmu_notifier *sc_mn = mmu_notifier_to_sc_mn(mn);
++
++	trace_kvm_age_hva(start, end);
++
++	return __kvm_age_hva_range(sc_mn->kvm, sc_mn->mm, start, end,
++				   kvm_age_gfn, false);
++}
++
++static int kvm_sc_mmu_notifier_test_young(struct mmu_notifier *mn,
++					  struct mm_struct *mm,
++					  unsigned long address)
++{
++	struct kvm_sc_mmu_notifier *sc_mn = mmu_notifier_to_sc_mn(mn);
++
++	trace_kvm_test_age_hva(address);
++
++	return __kvm_age_hva_range(sc_mn->kvm, sc_mn->mm, address,
++				   address + 1, kvm_test_age_gfn, false);
++}
++
++static void kvm_sc_mmu_notifier_release(struct mmu_notifier *mn,
++					struct mm_struct *mm)
++{
++	struct kvm_sc_mmu_notifier *sc_mn = mmu_notifier_to_sc_mn(mn);
++
++	__kvm_mmu_notifier_release(sc_mn->kvm);
++}
++
+ static const struct mmu_notifier_ops kvm_mmu_notifier_ops = {
+ 	.invalidate_range_start	= kvm_mmu_notifier_invalidate_range_start,
+ 	.invalidate_range_end	= kvm_mmu_notifier_invalidate_range_end,
+@@ -895,12 +1016,80 @@ static const struct mmu_notifier_ops kvm_mmu_notifier_ops = {
+ 	.release		= kvm_mmu_notifier_release,
+ };
+ 
++static const struct mmu_notifier_ops kvm_sc_mmu_notifier_ops = {
++	.invalidate_range_start	= kvm_sc_mmu_notifier_invalidate_range_start,
++	.invalidate_range_end	= kvm_sc_mmu_notifier_invalidate_range_end,
++	.clear_flush_young	= kvm_sc_mmu_notifier_clear_flush_young,
++	.clear_young		= kvm_sc_mmu_notifier_clear_young,
++	.test_young		= kvm_sc_mmu_notifier_test_young,
++	.release		= kvm_sc_mmu_notifier_release,
++};
++
+ static int kvm_init_mmu_notifier(struct kvm *kvm)
+ {
+ 	kvm->mmu_notifier.ops = &kvm_mmu_notifier_ops;
+ 	return mmu_notifier_register(&kvm->mmu_notifier, current->mm);
+ }
+ 
++static int kvm_register_memslot_mmu_notifier(struct kvm *kvm,
++					     struct mm_struct *mm)
++{
++	struct kvm_sc_mmu_notifier *sc_mn;
++	int r;
++
++	if (mm == kvm->mm)
++		return 0;
++
++	mutex_lock(&kvm->sc_mmu_notifiers_lock);
++	list_for_each_entry(sc_mn, &kvm->sc_mmu_notifiers, node) {
++		if (sc_mn->mm == mm) {
++			mutex_unlock(&kvm->sc_mmu_notifiers_lock);
++			return 0;
++		}
++	}
++
++	sc_mn = kzalloc(sizeof(*sc_mn), GFP_KERNEL_ACCOUNT);
++	if (!sc_mn) {
++		mutex_unlock(&kvm->sc_mmu_notifiers_lock);
++		return -ENOMEM;
++	}
++
++	sc_mn->notifier.ops = &kvm_sc_mmu_notifier_ops;
++	sc_mn->kvm = kvm;
++	sc_mn->mm = mm;
++	mmgrab(mm);
++
++	r = mmu_notifier_register(&sc_mn->notifier, mm);
++	if (r) {
++		mmdrop(mm);
++		kfree(sc_mn);
++		mutex_unlock(&kvm->sc_mmu_notifiers_lock);
++		return r;
++	}
++
++	list_add(&sc_mn->node, &kvm->sc_mmu_notifiers);
++	mutex_unlock(&kvm->sc_mmu_notifiers_lock);
++	return 0;
++}
++
++static void kvm_unregister_sc_mmu_notifiers(struct kvm *kvm)
++{
++	struct kvm_sc_mmu_notifier *sc_mn, *tmp;
++
++	mutex_lock(&kvm->sc_mmu_notifiers_lock);
++	list_for_each_entry_safe(sc_mn, tmp, &kvm->sc_mmu_notifiers, node) {
++		list_del(&sc_mn->node);
++		mutex_unlock(&kvm->sc_mmu_notifiers_lock);
++
++		mmu_notifier_unregister(&sc_mn->notifier, sc_mn->mm);
++		mmdrop(sc_mn->mm);
++		kfree(sc_mn);
++
++		mutex_lock(&kvm->sc_mmu_notifiers_lock);
++	}
++	mutex_unlock(&kvm->sc_mmu_notifiers_lock);
++}
++
+ #else  /* !CONFIG_KVM_GENERIC_MMU_NOTIFIER */
+ 
+ static int kvm_init_mmu_notifier(struct kvm *kvm)
+@@ -908,6 +1097,16 @@ static int kvm_init_mmu_notifier(struct kvm *kvm)
+ 	return 0;
+ }
+ 
++static int kvm_register_memslot_mmu_notifier(struct kvm *kvm,
++					     struct mm_struct *mm)
++{
++	return 0;
++}
++
++static void kvm_unregister_sc_mmu_notifiers(struct kvm *kvm)
++{
++}
++
+ #endif /* CONFIG_KVM_GENERIC_MMU_NOTIFIER */
+ 
+ #ifdef CONFIG_HAVE_KVM_PM_NOTIFIER
+@@ -957,6 +1156,9 @@ static void kvm_free_memslot(struct kvm *kvm, struct kvm_memory_slot *slot)
+ 	if (slot->flags & KVM_MEM_GUEST_MEMFD)
+ 		kvm_gmem_unbind(slot);
+ 
++	if (slot->userspace_mm)
++		mmdrop(slot->userspace_mm);
++
+ 	kvm_destroy_dirty_bitmap(slot);
+ 
+ 	kvm_arch_free_memslot(kvm, slot);
+@@ -1116,8 +1318,12 @@ static struct kvm *kvm_create_vm(unsigned long type, const char *fdname)
+ {
+ 	struct kvm *kvm = kvm_arch_alloc_vm();
+ 	struct kvm_memslots *slots;
++	bool sc_vm = type & KVM_VM_TYPE_SC_MASK;
++	unsigned int sc_slot_id = KVM_VM_TYPE_SC_SLOT_ID(type);
+ 	int r, i, j;
+ 
++	type &= ~KVM_VM_TYPE_SC_MASK;
++
+ 	if (!kvm)
+ 		return ERR_PTR(-ENOMEM);
+ 
+@@ -1129,6 +1335,9 @@ static struct kvm *kvm_create_vm(unsigned long type, const char *fdname)
+ 	mutex_init(&kvm->irq_lock);
+ 	mutex_init(&kvm->slots_lock);
+ 	mutex_init(&kvm->slots_arch_lock);
++	mutex_init(&kvm->sc_mmu_notifiers_lock);
++	INIT_LIST_HEAD(&kvm->sc_mmu_notifiers);
++	split_container_vm_init(kvm);
+ 	spin_lock_init(&kvm->mn_invalidate_lock);
+ 	rcuwait_init(&kvm->mn_memslots_update_rcuwait);
+ 	xa_init(&kvm->vcpu_array);
+@@ -1214,6 +1423,12 @@ static struct kvm *kvm_create_vm(unsigned long type, const char *fdname)
+ 	if (r)
+ 		goto out_err_no_debugfs;
+ 
++	if (sc_vm) {
++		r = split_container_vm_register(kvm, sc_slot_id);
++		if (r)
++			goto out_err_sc_register;
++	}
++
+ 	mutex_lock(&kvm_lock);
+ 	list_add(&kvm->vm_list, &vm_list);
+ 	mutex_unlock(&kvm_lock);
+@@ -1223,6 +1438,8 @@ static struct kvm *kvm_create_vm(unsigned long type, const char *fdname)
+ 
+ 	return kvm;
+ 
++out_err_sc_register:
++	kvm_destroy_vm_debugfs(kvm);
+ out_err_no_debugfs:
+ 	kvm_coalesced_mmio_free(kvm);
+ out_no_coalesced_mmio:
+@@ -1275,6 +1492,7 @@ static void kvm_destroy_vm(struct kvm *kvm)
+ 	int i;
+ 	struct mm_struct *mm = kvm->mm;
+ 
++	split_container_vm_destroy(kvm);
+ 	kvm_destroy_pm_notifier(kvm);
+ 	kvm_uevent_notify_change(KVM_EVENT_DESTROY_VM, kvm);
+ 	kvm_destroy_vm_debugfs(kvm);
+@@ -1293,6 +1511,7 @@ static void kvm_destroy_vm(struct kvm *kvm)
+ 	}
+ 	kvm_coalesced_mmio_free(kvm);
+ #ifdef CONFIG_KVM_GENERIC_MMU_NOTIFIER
++	kvm_unregister_sc_mmu_notifiers(kvm);
+ 	mmu_notifier_unregister(&kvm->mmu_notifier, kvm->mm);
+ 	/*
+ 	 * At this point, pending calls to invalidate_range_start()
+@@ -1813,6 +2032,7 @@ static void kvm_copy_memslot(struct kvm_memory_slot *dest,
+ 	dest->dirty_bitmap = src->dirty_bitmap;
+ 	dest->arch = src->arch;
+ 	dest->userspace_addr = src->userspace_addr;
++	dest->userspace_mm = src->userspace_mm;
+ 	dest->flags = src->flags;
+ 	dest->id = src->id;
+ 	dest->as_id = src->as_id;
+@@ -2127,6 +2347,15 @@ static int kvm_set_memory_region(struct kvm *kvm,
+ 	new->npages = npages;
+ 	new->flags = mem->flags;
+ 	new->userspace_addr = mem->userspace_addr;
++	if (change == KVM_MR_CREATE) {
++		r = kvm_register_memslot_mmu_notifier(kvm, current->mm);
++		if (r)
++			goto out;
++		mmgrab(current->mm);
++		new->userspace_mm = current->mm;
++	} else {
++		new->userspace_mm = old->userspace_mm;
++	}
+ 	if (mem->flags & KVM_MEM_GUEST_MEMFD) {
+ 		r = kvm_gmem_bind(kvm, new, mem->guest_memfd, mem->guest_memfd_offset);
+ 		if (r)
+@@ -2143,6 +2372,8 @@ static int kvm_set_memory_region(struct kvm *kvm,
+ 	if (mem->flags & KVM_MEM_GUEST_MEMFD)
+ 		kvm_gmem_unbind(new);
+ out:
++	if (change == KVM_MR_CREATE && new->userspace_mm)
++		mmdrop(new->userspace_mm);
+ 	kfree(new);
+ 	return r;
+ }
+@@ -2867,6 +3098,19 @@ static kvm_pfn_t kvm_resolve_pfn(struct kvm_follow_pfn *kfp, struct page *page,
+ 	return pfn;
+ }
+ 
++static struct mm_struct *kvm_memslot_userspace_mm(const struct kvm_memory_slot *slot)
++{
++	return slot && slot->userspace_mm ? slot->userspace_mm : current->mm;
++}
++
++static struct mm_struct *kvm_follow_pfn_mm(struct kvm_follow_pfn *kfp)
++{
++	if (kfp->mm)
++		return kfp->mm;
++
++	return kvm_memslot_userspace_mm(kfp->slot);
++}
++
+ /*
+  * The fast path to get the writable pfn which will be stored in @pfn,
+  * true indicates success, otherwise false is returned.
+@@ -2886,6 +3130,9 @@ static bool hva_to_pfn_fast(struct kvm_follow_pfn *kfp, kvm_pfn_t *pfn)
+ 	if (!((kfp->flags & FOLL_WRITE) || kfp->map_writable))
+ 		return false;
+ 
++	if (kvm_follow_pfn_mm(kfp) != current->mm)
++		return false;
++
+ 	if (kfp->pin)
+ 		r = pin_user_pages_fast(kfp->hva, 1, FOLL_WRITE, &page) == 1;
+ 	else
+@@ -2899,6 +3146,31 @@ static bool hva_to_pfn_fast(struct kvm_follow_pfn *kfp, kvm_pfn_t *pfn)
+ 	return false;
+ }
+ 
++static int hva_to_pfn_slow_gup(struct kvm_follow_pfn *kfp, struct page **page,
++			       unsigned int flags)
++{
++	struct mm_struct *mm = kvm_follow_pfn_mm(kfp);
++	int locked = 1;
++	long npages;
++
++	if (mm == current->mm) {
++		if (kfp->pin)
++			return pin_user_pages_unlocked(kfp->hva, 1, page, flags);
++
++		return get_user_pages_unlocked(kfp->hva, 1, page, flags);
++	}
++
++	mmap_read_lock(mm);
++	if (kfp->pin)
++		npages = pin_user_pages_remote(mm, kfp->hva, 1, flags, page, &locked);
++	else
++		npages = get_user_pages_remote(mm, kfp->hva, 1, flags, page, &locked);
++	if (locked)
++		mmap_read_unlock(mm);
++
++	return npages;
++}
++
+ /*
+  * The slow path to get the pfn of the specified host virtual address,
+  * 1 indicates success, -errno is returned if error is detected.
+@@ -2920,10 +3192,7 @@ static int hva_to_pfn_slow(struct kvm_follow_pfn *kfp, kvm_pfn_t *pfn)
+ 	struct page *page, *wpage;
+ 	int npages;
+ 
+-	if (kfp->pin)
+-		npages = pin_user_pages_unlocked(kfp->hva, 1, &page, flags);
+-	else
+-		npages = get_user_pages_unlocked(kfp->hva, 1, &page, flags);
++	npages = hva_to_pfn_slow_gup(kfp, &page, flags);
+ 	if (npages != 1)
+ 		return npages;
+ 
+@@ -2937,6 +3206,7 @@ static int hva_to_pfn_slow(struct kvm_follow_pfn *kfp, kvm_pfn_t *pfn)
+ 
+ 	/* map read fault as writable if possible */
+ 	if (!(flags & FOLL_WRITE) && kfp->map_writable &&
++	    kvm_follow_pfn_mm(kfp) == current->mm &&
+ 	    get_user_page_fast_only(kfp->hva, FOLL_WRITE, &wpage)) {
+ 		put_page(page);
+ 		page = wpage;
+@@ -2963,6 +3233,7 @@ static int hva_to_pfn_remapped(struct vm_area_struct *vma,
+ 			       struct kvm_follow_pfn *kfp, kvm_pfn_t *p_pfn)
+ {
+ 	struct follow_pfnmap_args args = { .vma = vma, .address = kfp->hva };
++	struct mm_struct *mm = kvm_follow_pfn_mm(kfp);
+ 	bool write_fault = kfp->flags & FOLL_WRITE;
+ 	int r;
+ 
+@@ -2981,7 +3252,7 @@ static int hva_to_pfn_remapped(struct vm_area_struct *vma,
+ 		 * not call the fault handler, so do it here.
+ 		 */
+ 		bool unlocked = false;
+-		r = fixup_user_fault(current->mm, kfp->hva,
++		r = fixup_user_fault(mm, kfp->hva,
+ 				     (write_fault ? FAULT_FLAG_WRITE : 0),
+ 				     &unlocked);
+ 		if (unlocked)
+@@ -3007,6 +3278,7 @@ static int hva_to_pfn_remapped(struct vm_area_struct *vma,
+ 
+ kvm_pfn_t hva_to_pfn(struct kvm_follow_pfn *kfp)
+ {
++	struct mm_struct *mm = kvm_follow_pfn_mm(kfp);
+ 	struct vm_area_struct *vma;
+ 	kvm_pfn_t pfn;
+ 	int npages, r;
+@@ -3027,9 +3299,9 @@ kvm_pfn_t hva_to_pfn(struct kvm_follow_pfn *kfp)
+ 	if (npages == -EHWPOISON)
+ 		return KVM_PFN_ERR_HWPOISON;
+ 
+-	mmap_read_lock(current->mm);
++	mmap_read_lock(mm);
+ retry:
+-	vma = vma_lookup(current->mm, kfp->hva);
++	vma = vma_lookup(mm, kfp->hva);
+ 
+ 	if (vma == NULL)
+ 		pfn = KVM_PFN_ERR_FAULT;
+@@ -3046,7 +3318,7 @@ kvm_pfn_t hva_to_pfn(struct kvm_follow_pfn *kfp)
+ 		else
+ 			pfn = KVM_PFN_ERR_FAULT;
+ 	}
+-	mmap_read_unlock(current->mm);
++	mmap_read_unlock(mm);
+ 	return pfn;
+ }
+ 
+@@ -3104,6 +3376,9 @@ int kvm_prefetch_pages(struct kvm_memory_slot *slot, gfn_t gfn,
+ 	if (entry < nr_pages)
+ 		return 0;
+ 
++	if (kvm_memslot_userspace_mm(slot) != current->mm)
++		return 0;
++
+ 	return get_user_pages_fast_only(addr, nr_pages, FOLL_WRITE, pages);
+ }
+ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_prefetch_pages);
+@@ -3200,11 +3475,69 @@ static int next_segment(unsigned long len, int offset)
+ 		return len;
+ }
+ 
++static int kvm_access_remote_memslot(struct kvm_memory_slot *slot,
++				     unsigned long addr, void *data, int len,
++				     bool write)
++{
++	struct mm_struct *mm = kvm_memslot_userspace_mm(slot);
++	unsigned int flags = write ? FOLL_WRITE : 0;
++	unsigned int offset = offset_in_page(addr);
++	struct page *page;
++	void *vaddr;
++	int locked = 1;
++	long npages;
++
++	if (WARN_ON_ONCE(offset + len > PAGE_SIZE))
++		return -EFAULT;
++
++	mmap_read_lock(mm);
++	npages = get_user_pages_remote(mm, addr, 1, flags, &page, &locked);
++	if (locked)
++		mmap_read_unlock(mm);
++	if (npages != 1)
++		return -EFAULT;
++
++	vaddr = kmap_local_page(page);
++	if (write) {
++		memcpy(vaddr + offset, data, len);
++		set_page_dirty_lock(page);
++	} else {
++		memcpy(data, vaddr + offset, len);
++	}
++	kunmap_local(vaddr);
++	put_page(page);
++
++	return 0;
++}
++
++static int kvm_copy_from_memslot(struct kvm_memory_slot *slot,
++				 unsigned long addr, void *data, int len)
++{
++	int r;
++
++	if (kvm_memslot_userspace_mm(slot) != current->mm)
++		return kvm_access_remote_memslot(slot, addr, data, len, false);
++
++	r = __copy_from_user(data, (void __user *)addr, len);
++	return r ? -EFAULT : 0;
++}
++
++static int kvm_copy_to_memslot(struct kvm_memory_slot *slot,
++			       unsigned long addr, const void *data, int len)
++{
++	int r;
++
++	if (kvm_memslot_userspace_mm(slot) != current->mm)
++		return kvm_access_remote_memslot(slot, addr, (void *)data, len, true);
++
++	r = __copy_to_user((void __user *)addr, data, len);
++	return r ? -EFAULT : 0;
++}
++
+ /* Copy @len bytes from guest memory at '(@gfn * PAGE_SIZE) + @offset' to @data */
+ static int __kvm_read_guest_page(struct kvm_memory_slot *slot, gfn_t gfn,
+ 				 void *data, int offset, int len)
+ {
+-	int r;
+ 	unsigned long addr;
+ 
+ 	if (WARN_ON_ONCE(offset + len > PAGE_SIZE))
+@@ -3213,10 +3546,7 @@ static int __kvm_read_guest_page(struct kvm_memory_slot *slot, gfn_t gfn,
+ 	addr = gfn_to_hva_memslot_prot(slot, gfn, NULL);
+ 	if (kvm_is_error_hva(addr))
+ 		return -EFAULT;
+-	r = __copy_from_user(data, (void __user *)addr + offset, len);
+-	if (r)
+-		return -EFAULT;
+-	return 0;
++	return kvm_copy_from_memslot(slot, addr + offset, data, len);
+ }
+ 
+ int kvm_read_guest_page(struct kvm *kvm, gfn_t gfn, void *data, int offset,
+@@ -3313,7 +3643,6 @@ static int __kvm_write_guest_page(struct kvm *kvm,
+ 				  struct kvm_memory_slot *memslot, gfn_t gfn,
+ 			          const void *data, int offset, int len)
+ {
+-	int r;
+ 	unsigned long addr;
+ 
+ 	if (WARN_ON_ONCE(offset + len > PAGE_SIZE))
+@@ -3322,8 +3651,7 @@ static int __kvm_write_guest_page(struct kvm *kvm,
+ 	addr = gfn_to_hva_memslot(memslot, gfn);
+ 	if (kvm_is_error_hva(addr))
+ 		return -EFAULT;
+-	r = __copy_to_user((void __user *)addr + offset, data, len);
+-	if (r)
++	if (kvm_copy_to_memslot(memslot, addr + offset, data, len))
+ 		return -EFAULT;
+ 	mark_page_dirty_in_slot(kvm, memslot, gfn);
+ 	return 0;
+@@ -3460,7 +3788,7 @@ int kvm_write_guest_offset_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
+ 	if (unlikely(!ghc->memslot))
+ 		return kvm_write_guest(kvm, gpa, data, len);
+ 
+-	r = __copy_to_user((void __user *)ghc->hva + offset, data, len);
++	r = kvm_copy_to_memslot(ghc->memslot, ghc->hva + offset, data, len);
+ 	if (r)
+ 		return -EFAULT;
+ 	mark_page_dirty_in_slot(kvm, ghc->memslot, gpa >> PAGE_SHIFT);
+@@ -3498,7 +3826,7 @@ int kvm_read_guest_offset_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
+ 	if (unlikely(!ghc->memslot))
+ 		return kvm_read_guest(kvm, gpa, data, len);
+ 
+-	r = __copy_from_user(data, (void __user *)ghc->hva + offset, len);
++	r = kvm_copy_from_memslot(ghc->memslot, ghc->hva + offset, data, len);
+ 	if (r)
+ 		return -EFAULT;
+ 
+@@ -4434,7 +4762,7 @@ static long kvm_vcpu_ioctl(struct file *filp,
+ 	struct kvm_fpu *fpu = NULL;
+ 	struct kvm_sregs *kvm_sregs = NULL;
+ 
+-	if (vcpu->kvm->mm != current->mm || vcpu->kvm->vm_dead)
++	if (vcpu->kvm->vm_dead)
+ 		return -EIO;
+ 
+ 	if (unlikely(_IOC_TYPE(ioctl) != KVMIO))
+@@ -4465,6 +4793,8 @@ static long kvm_vcpu_ioctl(struct file *filp,
+ 		r = -EINVAL;
+ 		if (arg)
+ 			goto out;
++		if (split_container_vcpu_is_idle(vcpu))
++			goto out;
+ 
+ 		/*
+ 		 * Note, vcpu->pid is primarily protected by vcpu->mutex. The
+@@ -4683,7 +5013,7 @@ static long kvm_vcpu_compat_ioctl(struct file *filp,
+ 	void __user *argp = compat_ptr(arg);
+ 	int r;
+ 
+-	if (vcpu->kvm->mm != current->mm || vcpu->kvm->vm_dead)
++	if (vcpu->kvm->vm_dead)
+ 		return -EIO;
+ 
+ 	switch (ioctl) {
+@@ -5173,12 +5503,41 @@ static long kvm_vm_ioctl(struct file *filp,
+ 	void __user *argp = (void __user *)arg;
+ 	int r;
+ 
+-	if (kvm->mm != current->mm || kvm->vm_dead)
++	if (kvm->vm_dead)
+ 		return -EIO;
+ 	switch (ioctl) {
+ 	case KVM_CREATE_VCPU:
+ 		r = kvm_vm_ioctl_create_vcpu(kvm, arg);
+ 		break;
++	case KVM_SC_ALLOC_VCPU: {
++		struct kvm_vcpu *vcpu = split_container_vcpu_alloc(kvm);
++
++		if (!vcpu) {
++			r = -ENOENT;
++			break;
++		}
++
++		/*
++		 * The idle hypercall marks the vCPU idle before the original
++		 * KVM_RUN has fully unwound back to QEMU.  Wait for that runner
++		 * to drop vcpu->mutex before exposing a second fd to the shadow
++		 * process, mirroring the ordering used by KVM_CREATE_VCPU.
++		 */
++		if (mutex_lock_killable(&vcpu->mutex)) {
++			split_container_vcpu_idle(vcpu);
++			r = -EINTR;
++			break;
++		}
++
++		kvm_get_kvm(vcpu->kvm);
++		r = create_vcpu_fd(vcpu);
++		mutex_unlock(&vcpu->mutex);
++		if (r < 0) {
++			kvm_put_kvm_no_destroy(vcpu->kvm);
++			split_container_vcpu_idle(vcpu);
++		}
++		break;
++	}
+ 	case KVM_ENABLE_CAP: {
+ 		struct kvm_enable_cap cap;
+ 
+@@ -5541,6 +5900,35 @@ static int kvm_dev_ioctl_create_vm(unsigned long type)
+ 	return r;
+ }
+ 
++static int kvm_dev_ioctl_sc_get_vm(unsigned long slot_id)
++{
++	int r;
++	struct kvm *kvm;
++	struct file *file;
++
++	kvm = split_container_vm_get(slot_id);
++	if (!kvm)
++		return -ENOENT;
++
++	r = get_unused_fd_flags(O_CLOEXEC);
++	if (r < 0)
++		goto put_kvm;
++
++	file = anon_inode_getfile("kvm-vm", &kvm_vm_fops, kvm, O_RDWR);
++	if (IS_ERR(file)) {
++		put_unused_fd(r);
++		r = PTR_ERR(file);
++		goto put_kvm;
++	}
++
++	fd_install(r, file);
++	return r;
++
++put_kvm:
++	kvm_put_kvm(kvm);
++	return r;
++}
++
+ static long kvm_dev_ioctl(struct file *filp,
+ 			  unsigned int ioctl, unsigned long arg)
+ {
+@@ -5555,6 +5943,9 @@ static long kvm_dev_ioctl(struct file *filp,
+ 	case KVM_CREATE_VM:
+ 		r = kvm_dev_ioctl_create_vm(arg);
+ 		break;
++	case KVM_SC_GET_VM:
++		r = kvm_dev_ioctl_sc_get_vm(arg);
++		break;
+ 	case KVM_CHECK_EXTENSION:
+ 		r = kvm_vm_ioctl_check_extension_generic(NULL, arg);
+ 		break;
+diff --git a/virt/kvm/kvm_mm.h b/virt/kvm/kvm_mm.h
+index 9fcc5d5b7..d31743273 100644
+--- a/virt/kvm/kvm_mm.h
++++ b/virt/kvm/kvm_mm.h
+@@ -27,6 +27,13 @@ struct kvm_follow_pfn {
+ 
+ 	unsigned long hva;
+ 
++	/*
++	 * Optional address space that owns @hva.  Defaults to current->mm when
++	 * left NULL, which preserves the legacy KVM uAPI restriction that vCPU
++	 * ioctls run from the VM creator's mm.
++	 */
++	struct mm_struct *mm;
++
+ 	/* FOLL_* flags modifying lookup behavior, e.g. FOLL_WRITE. */
+ 	unsigned int flags;
+ 
+diff --git a/virt/kvm/split_container.c b/virt/kvm/split_container.c
+new file mode 100644
+index 000000000..57dcc3438
+--- /dev/null
++++ b/virt/kvm/split_container.c
+@@ -0,0 +1,96 @@
++// SPDX-License-Identifier: GPL-2.0
++#include "split_container.h"
++
++#define MAX_N_KVMS 256
++
++static DEFINE_MUTEX(split_container_kvms_lock);
++static struct kvm *split_container_kvms[MAX_N_KVMS];
++
++void split_container_vm_init(struct kvm *kvm)
++{
++	spin_lock_init(&kvm->sc_idle_vcpus_lock);
++	INIT_LIST_HEAD(&kvm->sc_idle_vcpus);
++}
++
++int split_container_vm_register(struct kvm *kvm, unsigned int slot_id)
++{
++	int ret = 0;
++
++	if (slot_id >= MAX_N_KVMS)
++		return -EINVAL;
++
++	mutex_lock(&split_container_kvms_lock);
++	if (split_container_kvms[slot_id])
++		ret = -EBUSY;
++	else
++		split_container_kvms[slot_id] = kvm;
++	mutex_unlock(&split_container_kvms_lock);
++
++	return ret;
++}
++
++void split_container_vm_destroy(struct kvm *kvm)
++{
++	int i;
++
++	mutex_lock(&split_container_kvms_lock);
++	for (i = 0; i < MAX_N_KVMS; i++) {
++		if (split_container_kvms[i] == kvm)
++			split_container_kvms[i] = NULL;
++	}
++	mutex_unlock(&split_container_kvms_lock);
++}
++
++struct kvm *split_container_vm_get(unsigned int slot_id)
++{
++	struct kvm *kvm = NULL;
++
++	if (slot_id >= MAX_N_KVMS)
++		return NULL;
++
++	mutex_lock(&split_container_kvms_lock);
++	kvm = split_container_kvms[slot_id];
++	if (kvm && !kvm_get_kvm_safe(kvm))
++		kvm = NULL;
++	mutex_unlock(&split_container_kvms_lock);
++
++	return kvm;
++}
++
++void split_container_vcpu_idle(struct kvm_vcpu *vcpu)
++{
++	struct kvm *kvm = vcpu->kvm;
++
++	spin_lock(&kvm->sc_idle_vcpus_lock);
++	if (!READ_ONCE(vcpu->sc_idle)) {
++		WRITE_ONCE(vcpu->sc_idle, true);
++		list_add(&vcpu->sc_idle_node, &kvm->sc_idle_vcpus);
++	}
++	spin_unlock(&kvm->sc_idle_vcpus_lock);
++}
++
++bool split_container_vcpu_is_idle(struct kvm_vcpu *vcpu)
++{
++	return READ_ONCE(vcpu->sc_idle);
++}
++
++struct kvm_vcpu *split_container_vcpu_alloc(struct kvm *kvm)
++{
++	struct kvm_vcpu *vcpu;
++
++	if (!kvm)
++		return NULL;
++
++	spin_lock(&kvm->sc_idle_vcpus_lock);
++	if (list_empty(&kvm->sc_idle_vcpus)) {
++		vcpu = NULL;
++	} else {
++		vcpu = list_first_entry(&kvm->sc_idle_vcpus,
++					struct kvm_vcpu, sc_idle_node);
++		list_del_init(&vcpu->sc_idle_node);
++		WRITE_ONCE(vcpu->sc_idle, false);
++	}
++	spin_unlock(&kvm->sc_idle_vcpus_lock);
++
++	return vcpu;
++}
+diff --git a/virt/kvm/split_container.h b/virt/kvm/split_container.h
+new file mode 100644
+index 000000000..de0824b79
+--- /dev/null
++++ b/virt/kvm/split_container.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __KVM_SPLIT_CONTAINER_H
++#define __KVM_SPLIT_CONTAINER_H
++
++#include <linux/kvm_host.h>
++
++#define KVM_VM_TYPE_SC_MASK		0xff000000UL
++#define KVM_VM_TYPE_SC_SLOT_ID(type)	((((type) >> 24) - 1) & 0xff)
++
++void split_container_vm_init(struct kvm *kvm);
++int split_container_vm_register(struct kvm *kvm, unsigned int slot_id);
++void split_container_vm_destroy(struct kvm *kvm);
++struct kvm *split_container_vm_get(unsigned int slot_id);
++
++void split_container_vcpu_idle(struct kvm_vcpu *vcpu);
++bool split_container_vcpu_is_idle(struct kvm_vcpu *vcpu);
++struct kvm_vcpu *split_container_vcpu_alloc(struct kvm *kvm);
++
++#endif /* __KVM_SPLIT_CONTAINER_H */
+-- 
+2.34.1
+

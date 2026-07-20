@@ -1,0 +1,22 @@
+diff --git a/cvm_os/kernel/arch/x86_64/main.c b/cvm_os/kernel/arch/x86_64/main.c
+index f8a0a6d..b4e6bb2 100644
+--- a/cvm_os/kernel/arch/x86_64/main.c
++++ b/cvm_os/kernel/arch/x86_64/main.c
+@@ -68,8 +68,16 @@ void init_fpu_owner_locks(void);
+ static void tdx_early_debug_puts(const char *s)
+ {
+ 	while (*s) {
++		/*
++		 * Old 5.19 TDX KVM ABI: r10=type, r11=subfunction,
++		 * r12=arg0, r13=arg1. This is the ABI old QEMU handles.
++		 */
+ 		tdx_do_hypercall(
+-			VMCALL_SC_REQUEST, SC_REQ_DEBUG_PUTC, *s++, 0, 0);
++			TDX_HYPERCALL_STANDARD,
++			VMCALL_SC_REQUEST,
++			SC_REQ_DEBUG_PUTC,
++			*s++,
++			0);
+ 	}
+ }
+ #else

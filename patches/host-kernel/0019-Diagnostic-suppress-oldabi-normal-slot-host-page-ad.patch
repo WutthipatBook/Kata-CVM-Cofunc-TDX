@@ -1,0 +1,219 @@
+From 0000000000000000000000000000000000000019 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Tue, 7 Jul 2026 08:05:00 +0000
+Subject: [PATCH] KVM: Diagnostic suppress old-ABI normal-slot host page A/D
+
+CoFunc's old TDX ABI backs TD memory with normal userspace memslots.
+Private-role SPTE teardown was already suppressing host struct-page A/D
+propagation, but a later guarded run still hit:
+
+  BUG: Bad page state ... flags: referenced|dirty
+
+The failing journal also showed adjacent PFNs being installed through a
+shared-role TDP root over the same old-ABI normal memslot.  Treat TDX VMs
+with a normal memslot as old-ABI-backed for host page A/D purposes,
+regardless of the private/shared root role, and avoid the generic clean
+release helper that marks the PFN referenced immediately before dropping
+the page-fault reference.
+
+This remains diagnostic and intentionally logs the suppressed paths.
+---
+ arch/x86/kvm/mmu/mmu.c     | 22 ++++++++++------
+ arch/x86/kvm/mmu/tdp_mmu.c | 67 ++++++++++++++++++++++++++++++++++-----------
+ 2 files changed, 65 insertions(+), 24 deletions(-)
+
+--- a/arch/x86/kvm/mmu/mmu.c
++++ b/arch/x86/kvm/mmu/mmu.c
+@@ -4822,7 +4822,8 @@
+ 	}
+ }
+ 
+-static bool cofunc_tdx_oldabi_release_private_fault_pfn_clean(struct kvm_page_fault *fault)
++static bool cofunc_tdx_oldabi_release_fault_pfn_clean(struct kvm_vcpu *vcpu,
++						      struct kvm_page_fault *fault)
+ {
+ 	struct page *release_page;
+ 	struct page *page;
+@@ -4831,13 +4832,15 @@
+ 	int i;
+ 
+ 	/*
+-	 * CoFunc old-ABI private fault release page-flag cleanup diagnostic.
++	 * CoFunc old-ABI normal-slot fault release page-flag cleanup diagnostic.
+ 	 *
+-	 * Legacy userspace maps private TD pages through normal memslots.  Do
+-	 * not let KVM's clean release helper mark those pages accessed while a
+-	 * TDX private SPTE can keep the underlying page alive.
++	 * Legacy userspace maps TD pages through normal memslots, and both the
++	 * private and shared-alias roots can touch the same userspace backing.
++	 * Do not let KVM's clean release helper mark those pages accessed while
++	 * TDX/old-ABI teardown can later make this put_page() or a related unpin
++	 * the final release.
+ 	 */
+-	if (!fault->is_private ||
++	if (!kvm_gfn_shared_mask(vcpu->kvm) ||
+ 	    !fault->slot ||
+ 	    kvm_slot_can_be_private(fault->slot) ||
+ 	    is_error_noslot_pfn(fault->pfn))
+@@ -4852,7 +4855,8 @@
+ 
+ 	nr_pages = KVM_PAGES_PER_HPAGE(level);
+ 	if (atomic_dec_if_positive(&cofunc_tdx_oldabi_release_log_budget) >= 0) {
+-		pr_info("CoFunc old-ABI private fault release range: gfn=0x%llx pfn=0x%llx level=%u pages=%d max=%u req=%u goal=%u host=%u slot_flags=0x%lx hva=0x%lx writable=%d write=%d exec=%d\n",
++		pr_info("CoFunc old-ABI normal-slot fault release range: private=%d gfn=0x%llx pfn=0x%llx level=%u pages=%d max=%u req=%u goal=%u host=%u slot_flags=0x%lx hva=0x%lx writable=%d write=%d exec=%d\n",
++			fault->is_private,
+ 			(unsigned long long)fault->gfn,
+ 			(unsigned long long)fault->pfn,
+ 			level,
+@@ -4949,7 +4953,7 @@
+ 
+ 	if (kvm_slot_can_be_private(fault->slot))
+ 		kvm_private_mem_put_pfn(fault->slot, fault->pfn);
+-	else if (cofunc_tdx_oldabi_release_private_fault_pfn_clean(fault))
++	else if (cofunc_tdx_oldabi_release_fault_pfn_clean(vcpu, fault))
+ 		;
+ 	else
+ 		kvm_release_pfn_clean(fault->pfn);
+--- a/arch/x86/kvm/mmu/tdp_mmu.c
++++ b/arch/x86/kvm/mmu/tdp_mmu.c
+@@ -415,25 +415,49 @@
+ static atomic_t cofunc_tdx_private_spte_ad_log_budget = ATOMIC_INIT(256);
+ static atomic_t cofunc_tdx_private_spte_dirty_log_budget = ATOMIC_INIT(256);
+ 
+-static bool cofunc_tdx_private_spte_is_private_tdp(struct kvm *kvm,
+-						   union kvm_mmu_page_role role)
++static bool cofunc_tdx_oldabi_spte_uses_normal_memslot(struct kvm *kvm,
++						       int as_id, gfn_t gfn,
++						       bool *mem_private)
+ {
+-	return kvm_gfn_shared_mask(kvm) && kvm_mmu_page_role_is_private(role);
++	struct kvm_memory_slot *slot;
++
++	if (mem_private)
++		*mem_private = false;
++
++	if (!kvm_gfn_shared_mask(kvm))
++		return false;
++
++	gfn &= ~kvm_gfn_shared_mask(kvm);
++	slot = __gfn_to_memslot(__kvm_memslots(kvm, as_id), gfn);
++	if (!slot || kvm_slot_can_be_private(slot))
++		return false;
++
++	if (mem_private)
++		*mem_private = kvm_mem_is_private(kvm, gfn);
++
++	return true;
+ }
+ 
+ static bool cofunc_tdx_private_spte_skip_ad_track(struct kvm *kvm,
++						  int as_id,
+ 						  union kvm_mmu_page_role role,
+ 						  gfn_t gfn, u64 old_spte,
+ 						  u64 new_spte, int level)
+ {
+-	if (!cofunc_tdx_private_spte_is_private_tdp(kvm, role))
++	bool mem_private;
++	bool gfn_shared = !!(gfn & kvm_gfn_shared_mask(kvm));
++
++	if (!cofunc_tdx_oldabi_spte_uses_normal_memslot(kvm, as_id, gfn,
++							&mem_private))
+ 		return false;
+ 
+ 	if (!is_shadow_present_pte(old_spte) || !is_last_spte(old_spte, level))
+ 		return true;
+ 
+ 	if (atomic_dec_if_positive(&cofunc_tdx_private_spte_ad_log_budget) >= 0)
+-		pr_info("CoFunc old-ABI private TDP SPTE A/D suppress: gfn=0x%llx pfn=0x%llx level=%d old_accessed=%d old_dirty=%d new_present=%d new_accessed=%d new_dirty=%d\n",
++		pr_info("CoFunc old-ABI normal-slot TDP SPTE A/D suppress: role_private=%d gfn_shared=%d mem_private=%d gfn=0x%llx pfn=0x%llx level=%d old_accessed=%d old_dirty=%d new_present=%d new_accessed=%d new_dirty=%d\n",
++			kvm_mmu_page_role_is_private(role), gfn_shared,
++			mem_private,
+ 			(unsigned long long)gfn,
+ 			(unsigned long long)spte_to_pfn(old_spte),
+ 			level,
+@@ -446,15 +470,22 @@
+ }
+ 
+ static bool cofunc_tdx_private_spte_skip_dirty_track(struct kvm *kvm,
++						     int as_id,
+ 						     union kvm_mmu_page_role role,
+ 						     gfn_t gfn, u64 old_spte,
+ 						     u64 new_spte, int level)
+ {
+-	if (!cofunc_tdx_private_spte_is_private_tdp(kvm, role))
++	bool mem_private;
++	bool gfn_shared = !!(gfn & kvm_gfn_shared_mask(kvm));
++
++	if (!cofunc_tdx_oldabi_spte_uses_normal_memslot(kvm, as_id, gfn,
++							&mem_private))
+ 		return false;
+ 
+ 	if (atomic_dec_if_positive(&cofunc_tdx_private_spte_dirty_log_budget) >= 0)
+-		pr_info("CoFunc old-ABI private TDP SPTE dirty suppress: gfn=0x%llx pfn=0x%llx level=%d old_accessed=%d old_dirty=%d new_present=%d new_accessed=%d new_dirty=%d\n",
++		pr_info("CoFunc old-ABI normal-slot TDP SPTE dirty suppress: role_private=%d gfn_shared=%d mem_private=%d gfn=0x%llx pfn=0x%llx level=%d old_accessed=%d old_dirty=%d new_present=%d new_accessed=%d new_dirty=%d\n",
++			kvm_mmu_page_role_is_private(role), gfn_shared,
++			mem_private,
+ 			(unsigned long long)gfn,
+ 			(unsigned long long)spte_to_pfn(old_spte),
+ 			level,
+@@ -747,7 +778,7 @@
+ 
+ 	if (was_leaf && is_dirty_spte(old_spte) &&
+ 	    (!is_present || !is_dirty_spte(new_spte) || pfn_changed)) {
+-		if (!cofunc_tdx_private_spte_skip_dirty_track(kvm, role, gfn,
++		if (!cofunc_tdx_private_spte_skip_dirty_track(kvm, as_id, role, gfn,
+ 							      old_spte, new_spte, level))
+ 			kvm_set_pfn_dirty(old_pfn);
+ 	}
+@@ -794,7 +825,7 @@
+ 				union kvm_mmu_page_role role, bool shared)
+ {
+ 	__handle_changed_spte(kvm, as_id, gfn, old_spte, new_spte, role, shared);
+-	if (!cofunc_tdx_private_spte_skip_ad_track(kvm, role, gfn, old_spte,
++	if (!cofunc_tdx_private_spte_skip_ad_track(kvm, as_id, role, gfn, old_spte,
+ 						   new_spte, role.level)) {
+ 		handle_changed_spte_acc_track(old_spte, new_spte, role.level);
+ 		handle_changed_spte_dirty_log(kvm, as_id, gfn, old_spte,
+@@ -867,7 +898,9 @@
+ 	__handle_changed_spte(
+ 		kvm, iter->as_id, iter->gfn,
+ 		iter->old_spte, new_spte, role, true);
+-	if (!cofunc_tdx_private_spte_skip_ad_track(kvm, role, iter->gfn, iter->old_spte, new_spte, iter->level))
++	if (!cofunc_tdx_private_spte_skip_ad_track(kvm, iter->as_id, role,
++						   iter->gfn, iter->old_spte,
++						   new_spte, iter->level))
+ 		handle_changed_spte_acc_track(iter->old_spte, new_spte, iter->level);
+ 
+ 	if (freeze_spte)
+@@ -975,7 +1008,9 @@
+ 	role.level = level;
+ 	__handle_changed_spte(kvm, as_id, gfn, old_spte, new_spte, role, false);
+ 
+-	if (record_acc_track)
++	if (record_acc_track &&
++	    !cofunc_tdx_private_spte_skip_ad_track(kvm, as_id, role, gfn,
++						   old_spte, new_spte, level))
+ 		handle_changed_spte_acc_track(old_spte, new_spte, level);
+ 	if (record_dirty_log)
+ 		handle_changed_spte_dirty_log(kvm, as_id, gfn, old_spte,
+@@ -1737,8 +1772,18 @@
+ 		 * Capture the dirty status of the page, so that it doesn't get
+ 		 * lost when the SPTE is marked for access tracking.
+ 		 */
+-		if (is_writable_pte(new_spte))
+-			kvm_set_pfn_dirty(spte_to_pfn(new_spte));
++		if (is_writable_pte(new_spte)) {
++			union kvm_mmu_page_role role = sptep_to_sp(iter->sptep)->role;
++			int as_id = range->slot ? range->slot->as_id : 0;
++
++			role.level = iter->level;
++			if (!cofunc_tdx_private_spte_skip_dirty_track(kvm,
++								      as_id, role,
++								      iter->gfn,
++								      iter->old_spte,
++								      new_spte, iter->level))
++				kvm_set_pfn_dirty(spte_to_pfn(new_spte));
++		}
+ 
+ 		new_spte = mark_spte_for_access_track(new_spte);
+ 	}

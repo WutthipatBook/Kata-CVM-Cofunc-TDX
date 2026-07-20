@@ -1,0 +1,39 @@
+diff --git a/cvm_os/kernel/arch/x86_64/plat/intel_tdx/tdx.c b/cvm_os/kernel/arch/x86_64/plat/intel_tdx/tdx.c
+--- a/cvm_os/kernel/arch/x86_64/plat/intel_tdx/tdx.c
++++ b/cvm_os/kernel/arch/x86_64/plat/intel_tdx/tdx.c
+@@ -96,6 +96,7 @@ u64 tdx_do_rdmsr(u64 msr)
+ 
+ void tdx_do_wrmsr(u64 msr, u64 value)
+ {
++	u64 ret;
+ 	struct tdx_hypercall_args args = {
+ 		.r10 = TDX_HYPERCALL_STANDARD,
+ 		.r11 = EXIT_REASON_MSR_WRITE,
+@@ -108,6 +109,16 @@ void tdx_do_wrmsr(u64 msr, u64 value)
+ 		return;
+ 	}
+ 
++	/*
++	 * Diagnostic only: on this local 5.19 stack, the first old-ABI smoke
++	 * run failed while set_turbo_boost() wrote MSR_IA32_MISC_ENABLE
++	 * (0x1a0). Skip only this write to test whether boot advances.
++	 */
++	if (msr == 0x1a0) {
++		printk("[CoFunc diag] skip TDX WRMSR 0x1a0 value=0x%lx\n", value);
++		return;
++	}
++
+ 	/*
+ 	 * Emulate the MSR write via hypercall. More info about ABI
+ 	 * can be found in TDX Guest-Host-Communication Interface
+@@ -115,6 +125,9 @@ void tdx_do_wrmsr(u64 msr, u64 value)
+ 	 * (GHCI) section titled "TDG.VP.VMCALL<Instruction.WRMSR>".
+ 	 */
+-	BUG_ON(__tdx_hypercall(&args, 0));
++	ret = __tdx_hypercall(&args, 0);
++	if (ret)
++		printk("[CoFunc diag] TDX WRMSR failed msr=0x%lx value=0x%lx ret=0x%lx\n", msr, value, ret);
++	BUG_ON(ret);
+ }
+ 
+ long tdx_do_hypercall(u32 nr, u64 p1, u64 p2, u64 p3, u64 p4)

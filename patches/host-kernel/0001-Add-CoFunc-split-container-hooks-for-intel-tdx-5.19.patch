@@ -1,0 +1,393 @@
+diff --git a/arch/x86/kvm/Makefile b/arch/x86/kvm/Makefile
+index f1ad445df..9a654790d 100644
+--- a/arch/x86/kvm/Makefile
++++ b/arch/x86/kvm/Makefile
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0
+ 
+-ccflags-y += -I $(srctree)/arch/x86/kvm
++ccflags-y += -I $(srctree)/arch/x86/kvm -I $(srctree)/virt/kvm
+ ccflags-$(CONFIG_KVM_WERROR) += -Werror
+ 
+ ifeq ($(CONFIG_FRAME_POINTER),y)
+diff --git a/arch/x86/kvm/vmx/tdx.c b/arch/x86/kvm/vmx/tdx.c
+index 65ca7bb0b..12dc3b963 100644
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0
+ #include <linux/cpu.h>
++#include <linux/kvm_para.h>
+ #include <linux/mmu_context.h>
+ #include <linux/misc_cgroup.h>
+ 
+@@ -16,6 +17,7 @@
+ #include "vmx.h"
+ #include "x86.h"
+ #include "mmu.h"
++#include "split_container.h"
+ #include "../mmu/spte.h"	/* for SPTE_ENT_PER_PAGE */
+ 
+ #include <trace/events/kvm.h>
+@@ -1654,6 +1656,8 @@ static int tdx_vp_vmcall_to_user(struct kvm_vcpu *vcpu)
+ 	vcpu->run->tdx.type = KVM_EXIT_TDX_VMCALL;
+ 	tdx_vmcall->type = tdvmcall_exit_type(vcpu);
+ 	tdx_vmcall->subfunction = tdvmcall_leaf(vcpu);
++	if (tdx_vmcall->subfunction == KVM_HC_TDX_SC_VCPU_IDLE)
++		split_container_vcpu_idle(vcpu);
+ 
+ 	reg_mask = kvm_rcx_read(vcpu);
+ 	tdx_vmcall->reg_mask = reg_mask;
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 53bdc47b3..8be70c545 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -343,6 +343,8 @@ struct kvm_vcpu {
+ 	sigset_t sigset;
+ 	unsigned int halt_poll_ns;
+ 	bool valid_wakeup;
++	bool sc_idle;
++	struct list_head sc_idle_node;
+ 
+ #ifdef CONFIG_HAS_IOMEM
+ 	int mmio_needed;
+@@ -771,6 +773,9 @@ struct kvm {
+ #endif
+ 
+ 	struct mutex irq_lock;
++	spinlock_t sc_idle_vcpus_lock;
++	struct list_head sc_idle_vcpus;
++
+ #ifdef CONFIG_HAVE_KVM_IRQCHIP
+ 	/*
+ 	 * Update side is protected by irq_lock.
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 4b8e5201f..6bfd02847 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -1006,6 +1006,9 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_GET_API_VERSION       _IO(KVMIO,   0x00)
+ #define KVM_CREATE_VM             _IO(KVMIO,   0x01) /* returns a VM fd */
+ #define KVM_GET_MSR_INDEX_LIST    _IOWR(KVMIO, 0x02, struct kvm_msr_list)
++/* CoFunc split-container helpers. */
++#define KVM_SC_GET_VM		  _IO(KVMIO,   0x10)
++#define KVM_SC_ALLOC_VCPU	  _IO(KVMIO,   0x11)
+ 
+ #define KVM_S390_ENABLE_SIE       _IO(KVMIO,   0x06)
+ /*
+diff --git a/include/uapi/linux/kvm_para.h b/include/uapi/linux/kvm_para.h
+index 960c7e93d..8c5593d7b 100644
+--- a/include/uapi/linux/kvm_para.h
++++ b/include/uapi/linux/kvm_para.h
+@@ -30,6 +30,10 @@
+ #define KVM_HC_SEND_IPI		10
+ #define KVM_HC_SCHED_YIELD		11
+ #define KVM_HC_MAP_GPA_RANGE		12
++#define KVM_HC_SC_VCPU_IDLE		100
++#define KVM_HC_SC_REQUEST		101
++#define KVM_HC_TDX_SC_VCPU_IDLE		0x10010
++#define KVM_HC_TDX_SC_REQUEST		0x10011
+ 
+ /*
+  * hypercalls use architecture specific
+diff --git a/virt/kvm/Makefile.kvm b/virt/kvm/Makefile.kvm
+index 2c27d5d0c..f9e6cb04e 100644
+--- a/virt/kvm/Makefile.kvm
++++ b/virt/kvm/Makefile.kvm
+@@ -5,7 +5,8 @@
+ 
+ KVM ?= ../../../virt/kvm
+ 
+-kvm-y := $(KVM)/kvm_main.o $(KVM)/eventfd.o $(KVM)/binary_stats.o
++kvm-y := $(KVM)/kvm_main.o $(KVM)/eventfd.o $(KVM)/binary_stats.o \
++	 $(KVM)/split_container.o
+ kvm-$(CONFIG_KVM_VFIO) += $(KVM)/vfio.o
+ kvm-$(CONFIG_KVM_MMIO) += $(KVM)/coalesced_mmio.o
+ kvm-$(CONFIG_KVM_ASYNC_PF) += $(KVM)/async_pf.o
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 1ce8f72c9..3033b3ee0 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -61,6 +61,7 @@
+ #include "async_pf.h"
+ #include "kvm_mm.h"
+ #include "vfio.h"
++#include "split_container.h"
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/kvm.h>
+@@ -1267,10 +1268,15 @@ int __weak kvm_arch_create_vm_debugfs(struct kvm *kvm)
+ 
+ static struct kvm *kvm_create_vm(unsigned long type)
+ {
+-	struct kvm *kvm = kvm_arch_alloc_vm();
++	bool sc_vm = type & KVM_VM_TYPE_SC_MASK;
++	unsigned int sc_slot_id = KVM_VM_TYPE_SC_SLOT_ID(type);
++	struct kvm *kvm;
+ 	struct kvm_memslots *slots;
+ 	int r = -ENOMEM;
+ 	int i, j;
++	type &= ~KVM_VM_TYPE_SC_MASK;
++
++	kvm = kvm_arch_alloc_vm();
+ 
+ 	if (!kvm)
+ 		return ERR_PTR(-ENOMEM);
+@@ -1283,6 +1289,7 @@ static struct kvm *kvm_create_vm(unsigned long type)
+ 	mutex_init(&kvm->irq_lock);
+ 	mutex_init(&kvm->slots_lock);
+ 	mutex_init(&kvm->slots_arch_lock);
++	split_container_vm_init(kvm);
+ 	spin_lock_init(&kvm->mn_invalidate_lock);
+ 	rcuwait_init(&kvm->mn_memslots_update_rcuwait);
+ 	xa_init(&kvm->vcpu_array);
+@@ -1356,6 +1363,12 @@ static struct kvm *kvm_create_vm(unsigned long type)
+ 	if (r)
+ 		goto out_err;
+ 
++	if (sc_vm) {
++		r = split_container_vm_register(kvm, sc_slot_id);
++		if (r)
++			goto out_err;
++	}
++
+ 	mutex_lock(&kvm_lock);
+ 	list_add(&kvm->vm_list, &vm_list);
+ 	mutex_unlock(&kvm_lock);
+@@ -1417,6 +1430,7 @@ static void kvm_destroy_vm(struct kvm *kvm)
+ 	int i;
+ 	struct mm_struct *mm = kvm->mm;
+ 
++	split_container_vm_destroy(kvm);
+ 	kvm_destroy_pm_notifier(kvm);
+ 	kvm_uevent_notify_change(KVM_EVENT_DESTROY_VM, kvm);
+ 	kvm_destroy_vm_debugfs(kvm);
+@@ -4246,7 +4260,7 @@ static long kvm_vcpu_ioctl(struct file *filp,
+ 	struct kvm_fpu *fpu = NULL;
+ 	struct kvm_sregs *kvm_sregs = NULL;
+ 
+-	if (vcpu->kvm->mm != current->mm || vcpu->kvm->vm_dead)
++	if (vcpu->kvm->vm_dead)
+ 		return -EIO;
+ 
+ 	if (unlikely(_IOC_TYPE(ioctl) != KVMIO))
+@@ -4268,6 +4282,8 @@ static long kvm_vcpu_ioctl(struct file *filp,
+ 		r = -EINVAL;
+ 		if (arg)
+ 			goto out;
++		if (split_container_vcpu_is_idle(vcpu))
++			goto out;
+ 		oldpid = rcu_access_pointer(vcpu->pid);
+ 		if (unlikely(oldpid != task_pid(current))) {
+ 			/* The thread running this VCPU changed. */
+@@ -4875,12 +4891,35 @@ static long kvm_vm_ioctl(struct file *filp,
+ 	void __user *argp = (void __user *)arg;
+ 	int r;
+ 
+-	if (kvm->mm != current->mm || kvm->vm_dead)
++	if (kvm->vm_dead)
+ 		return -EIO;
+ 	switch (ioctl) {
+ 	case KVM_CREATE_VCPU:
+ 		r = kvm_vm_ioctl_create_vcpu(kvm, arg);
+ 		break;
++	case KVM_SC_ALLOC_VCPU: {
++		struct kvm_vcpu *vcpu = split_container_vcpu_alloc(kvm);
++
++		if (!vcpu) {
++			r = -ENOENT;
++			break;
++		}
++
++		if (mutex_lock_killable(&vcpu->mutex)) {
++			split_container_vcpu_idle(vcpu);
++			r = -EINTR;
++			break;
++		}
++
++		kvm_get_kvm(vcpu->kvm);
++		r = create_vcpu_fd(vcpu);
++		mutex_unlock(&vcpu->mutex);
++		if (r < 0) {
++			kvm_put_kvm_no_destroy(vcpu->kvm);
++			split_container_vcpu_idle(vcpu);
++		}
++		break;
++	}
+ 	case KVM_ENABLE_CAP: {
+ 		struct kvm_enable_cap cap;
+ 
+@@ -5227,6 +5266,35 @@ static int kvm_dev_ioctl_create_vm(unsigned long type)
+ 	return r;
+ }
+ 
++static int kvm_dev_ioctl_sc_get_vm(unsigned long slot_id)
++{
++	int r;
++	struct kvm *kvm;
++	struct file *file;
++
++	kvm = split_container_vm_get(slot_id);
++	if (!kvm)
++		return -ENOENT;
++
++	r = get_unused_fd_flags(O_CLOEXEC);
++	if (r < 0)
++		goto put_kvm;
++
++	file = anon_inode_getfile("kvm-vm", &kvm_vm_fops, kvm, O_RDWR);
++	if (IS_ERR(file)) {
++		put_unused_fd(r);
++		r = PTR_ERR(file);
++		goto put_kvm;
++	}
++
++	fd_install(r, file);
++	return r;
++
++put_kvm:
++	kvm_put_kvm(kvm);
++	return r;
++}
++
+ static long kvm_dev_ioctl(struct file *filp,
+ 			  unsigned int ioctl, unsigned long arg)
+ {
+@@ -5241,6 +5309,9 @@ static long kvm_dev_ioctl(struct file *filp,
+ 	case KVM_CREATE_VM:
+ 		r = kvm_dev_ioctl_create_vm(arg);
+ 		break;
++	case KVM_SC_GET_VM:
++		r = kvm_dev_ioctl_sc_get_vm(arg);
++		break;
+ 	case KVM_CHECK_EXTENSION:
+ 		r = kvm_vm_ioctl_check_extension_generic(NULL, arg);
+ 		break;
+diff --git a/virt/kvm/split_container.c b/virt/kvm/split_container.c
+new file mode 100644
+index 000000000..99f8daf97
+--- /dev/null
++++ b/virt/kvm/split_container.c
+@@ -0,0 +1,97 @@
++// SPDX-License-Identifier: GPL-2.0
++#include "split_container.h"
++
++#define MAX_N_KVMS 256
++
++static DEFINE_MUTEX(split_container_kvms_lock);
++static struct kvm *split_container_kvms[MAX_N_KVMS];
++
++void split_container_vm_init(struct kvm *kvm)
++{
++	spin_lock_init(&kvm->sc_idle_vcpus_lock);
++	INIT_LIST_HEAD(&kvm->sc_idle_vcpus);
++}
++
++int split_container_vm_register(struct kvm *kvm, unsigned int slot_id)
++{
++	int ret = 0;
++
++	if (slot_id >= MAX_N_KVMS)
++		return -EINVAL;
++
++	mutex_lock(&split_container_kvms_lock);
++	if (split_container_kvms[slot_id])
++		ret = -EBUSY;
++	else
++		split_container_kvms[slot_id] = kvm;
++	mutex_unlock(&split_container_kvms_lock);
++
++	return ret;
++}
++
++void split_container_vm_destroy(struct kvm *kvm)
++{
++	int i;
++
++	mutex_lock(&split_container_kvms_lock);
++	for (i = 0; i < MAX_N_KVMS; i++) {
++		if (split_container_kvms[i] == kvm)
++			split_container_kvms[i] = NULL;
++	}
++	mutex_unlock(&split_container_kvms_lock);
++}
++
++struct kvm *split_container_vm_get(unsigned int slot_id)
++{
++	struct kvm *kvm = NULL;
++
++	if (slot_id >= MAX_N_KVMS)
++		return NULL;
++
++	mutex_lock(&split_container_kvms_lock);
++	kvm = split_container_kvms[slot_id];
++	if (kvm && !kvm_get_kvm_safe(kvm))
++		kvm = NULL;
++	mutex_unlock(&split_container_kvms_lock);
++
++	return kvm;
++}
++
++void split_container_vcpu_idle(struct kvm_vcpu *vcpu)
++{
++	struct kvm *kvm = vcpu->kvm;
++
++	spin_lock(&kvm->sc_idle_vcpus_lock);
++	if (!READ_ONCE(vcpu->sc_idle)) {
++		WRITE_ONCE(vcpu->sc_idle, true);
++		list_add(&vcpu->sc_idle_node, &kvm->sc_idle_vcpus);
++	}
++	spin_unlock(&kvm->sc_idle_vcpus_lock);
++}
++EXPORT_SYMBOL_GPL(split_container_vcpu_idle);
++
++bool split_container_vcpu_is_idle(struct kvm_vcpu *vcpu)
++{
++	return READ_ONCE(vcpu->sc_idle);
++}
++
++struct kvm_vcpu *split_container_vcpu_alloc(struct kvm *kvm)
++{
++	struct kvm_vcpu *vcpu;
++
++	if (!kvm)
++		return NULL;
++
++	spin_lock(&kvm->sc_idle_vcpus_lock);
++	if (list_empty(&kvm->sc_idle_vcpus)) {
++		vcpu = NULL;
++	} else {
++		vcpu = list_first_entry(&kvm->sc_idle_vcpus,
++					struct kvm_vcpu, sc_idle_node);
++		list_del_init(&vcpu->sc_idle_node);
++		WRITE_ONCE(vcpu->sc_idle, false);
++	}
++	spin_unlock(&kvm->sc_idle_vcpus_lock);
++
++	return vcpu;
++}
+diff --git a/virt/kvm/split_container.h b/virt/kvm/split_container.h
+new file mode 100644
+index 000000000..de0824b79
+--- /dev/null
++++ b/virt/kvm/split_container.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __KVM_SPLIT_CONTAINER_H
++#define __KVM_SPLIT_CONTAINER_H
++
++#include <linux/kvm_host.h>
++
++#define KVM_VM_TYPE_SC_MASK		0xff000000UL
++#define KVM_VM_TYPE_SC_SLOT_ID(type)	((((type) >> 24) - 1) & 0xff)
++
++void split_container_vm_init(struct kvm *kvm);
++int split_container_vm_register(struct kvm *kvm, unsigned int slot_id);
++void split_container_vm_destroy(struct kvm *kvm);
++struct kvm *split_container_vm_get(unsigned int slot_id);
++
++void split_container_vcpu_idle(struct kvm_vcpu *vcpu);
++bool split_container_vcpu_is_idle(struct kvm_vcpu *vcpu);
++struct kvm_vcpu *split_container_vcpu_alloc(struct kvm *kvm);
++
++#endif /* __KVM_SPLIT_CONTAINER_H */

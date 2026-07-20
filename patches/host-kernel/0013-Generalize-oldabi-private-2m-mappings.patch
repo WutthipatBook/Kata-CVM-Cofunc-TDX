@@ -1,0 +1,317 @@
+From 9b3f2d5c0a6f7e813cc6b3bba7cbcf0e5f001013 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Sat, 4 Jul 2026 00:00:00 +0000
+Subject: [PATCH] KVM: Generalize old-ABI private 2M mapping promotion
+
+0012 proved that old-ABI CoFunc private runtime faults can safely use a 2M
+private TDP leaf when the guest frame, host PFN, lpage state, and backing page
+all support it.  Replace the face-GFN-only diagnostic override with a guarded
+old-ABI path: a private fault in a non-private memslot may be promoted from a
+4K request back to 2M only when dirty tracking and lpage disallow bits are not
+blocking, both GFN and PFN are 2M-aligned, and the PFN belongs to a real
+compound page of at least 2M order.
+
+This preserves normal shared-memory behavior and avoids relying on the host HVA
+page-table mapping level for the legacy private-fault shape where userspace
+does not expose a private-capable memslot.
+---
+ arch/x86/kvm/mmu/mmu.c | 151 ++++++++++++++---------------------------
+ 1 file changed, 49 insertions(+), 102 deletions(-)
+
+--- a/arch/x86/kvm/mmu/mmu.c
++++ b/arch/x86/kvm/mmu/mmu.c
+@@ -3269,26 +3269,11 @@ static int host_pfn_mapping_level(struct kvm *kvm, gfn_t gfn,
+ 	return level;
+ }
+ 
+-/*
+- * CoFunc old-ABI face-GFN hugepage decision diagnostic: identify why
+- * kvm_mmu_hugepage_adjust() lowers exact runtime grant faults from max=2
+- * to req=1.
+- */
+-#define COFUNC_TDX_HP_DIAG_MIN_GFN	0x500000ULL
+-#define COFUNC_TDX_HP_DIAG_MAX_GFN	0x800000ULL
+-static atomic_t cofunc_tdx_hp_max_mapping_log_budget = ATOMIC_INIT(1024);
+-static atomic_t cofunc_tdx_hp_adjust_log_budget = ATOMIC_INIT(1024);
+-
+-static bool cofunc_tdx_hp_diag_should_log(gfn_t gfn, atomic_t *budget)
+-{
+-	return gfn >= COFUNC_TDX_HP_DIAG_MIN_GFN &&
+-	       gfn < COFUNC_TDX_HP_DIAG_MAX_GFN &&
+-	       atomic_dec_if_positive(budget) >= 0;
+-}
++static atomic_t cofunc_tdx_oldabi_private_2m_log_budget = ATOMIC_INIT(64);
+ 
+-static unsigned long cofunc_tdx_hp_lpage_disallow(gfn_t gfn,
+-						  const struct kvm_memory_slot *slot,
+-						  int level)
++static unsigned long cofunc_tdx_oldabi_lpage_disallow(gfn_t gfn,
++						      const struct kvm_memory_slot *slot,
++						      int level)
+ {
+ 	if (!slot || level < PG_LEVEL_2M || level > KVM_MAX_HUGEPAGE_LEVEL)
+ 		return 0;
+@@ -3296,16 +3281,48 @@ static unsigned long cofunc_tdx_hp_lpage_disallow(gfn_t gfn,
+ 	return lpage_info_slot(gfn, slot, level)->disallow_lpage;
+ }
+ 
+-static unsigned long cofunc_tdx_hp_pages_for_level(int level)
++static int cofunc_tdx_oldabi_private_2m_pfn_order(kvm_pfn_t pfn)
+ {
+-	if (level < PG_LEVEL_4K || level > KVM_MAX_HUGEPAGE_LEVEL)
+-		return 0;
+-	return KVM_PAGES_PER_HPAGE(level);
++	struct page *page;
++
++	if (!pfn_valid(pfn))
++		return -1;
++
++	page = pfn_to_page(pfn);
++	return compound_order(compound_head(page));
+ }
+ 
+-static int cofunc_tdx_hp_pfn_order(kvm_pfn_t pfn)
++/*
++ * Old CoFunc TDX userspace backs private runtime memory with a normal memslot.
++ * For those private faults, the host HVA page-table walk can report 4K even
++ * when the PFN is a 2M hugetlb page.  Promote only if KVM's normal blockers
++ * are absent and both the GFN and PFN can form an exact 2M private leaf.
++ */
++static bool cofunc_tdx_oldabi_private_2m_capable(struct kvm_page_fault *fault,
++						 int *pfn_order)
+ {
+-	return compound_order(compound_head(pfn_to_page(pfn)));
++	struct kvm_memory_slot *slot = fault->slot;
++	const unsigned long mask = KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1;
++	int order;
++
++	if (!fault->is_private || !slot || kvm_slot_can_be_private(slot))
++		return false;
++
++	if (fault->req_level != PG_LEVEL_4K ||
++	    fault->max_level < PG_LEVEL_2M ||
++	    fault->huge_page_disallowed ||
++	    kvm_slot_dirty_track_enabled(slot) ||
++	    cofunc_tdx_oldabi_lpage_disallow(fault->gfn, slot, PG_LEVEL_2M))
++		return false;
++
++	if ((fault->gfn & mask) || (fault->pfn & mask))
++		return false;
++
++	order = cofunc_tdx_oldabi_private_2m_pfn_order(fault->pfn);
++	if (pfn_order)
++		*pfn_order = order;
++
++	return order >= KVM_HPAGE_GFN_SHIFT(PG_LEVEL_2M);
+ }
+ 
+ static int __kvm_mmu_max_mapping_level(struct kvm *kvm,
+@@ -3313,64 +3330,23 @@ static int __kvm_mmu_max_mapping_level(struct kvm *kvm,
+ 				       gfn_t gfn, int max_level, int host_level)
+ {
+ 	struct kvm_lpage_info *linfo;
+-	int original_max_level = max_level;
+-	int capped_max_level;
+-	int post_lpage_max_level;
+-	int first_disallowed_level = PG_LEVEL_NONE;
+-	int slot_private = slot && kvm_slot_can_be_private(slot);
+-	int dirty_track = slot && kvm_slot_dirty_track_enabled(slot);
+-	int host_level_in = host_level;
+-	int host_level_used = host_level;
+-	unsigned long l2_disallow = 0;
+-	unsigned long l3_disallow = 0;
+-	unsigned long hva = slot ? __gfn_to_hva_memslot(slot, gfn) : 0;
+-	bool log_diag;
+-	int result;
+ 
+ 	max_level = min(max_level, max_huge_page_level);
+-	capped_max_level = max_level;
+-	if (max_level >= PG_LEVEL_2M)
+-		l2_disallow = cofunc_tdx_hp_lpage_disallow(gfn, slot,
+-							    PG_LEVEL_2M);
+-	if (max_level >= PG_LEVEL_1G)
+-		l3_disallow = cofunc_tdx_hp_lpage_disallow(gfn, slot,
+-							    PG_LEVEL_1G);
+ 	for ( ; max_level > PG_LEVEL_4K; max_level--) {
+ 		linfo = lpage_info_slot(gfn, slot, max_level);
+ 		if (!linfo->disallow_lpage)
+ 			break;
+-		if (first_disallowed_level == PG_LEVEL_NONE)
+-			first_disallowed_level = max_level;
+ 	}
+-	post_lpage_max_level = max_level;
+ 
+-	if (max_level == PG_LEVEL_4K) {
+-		result = PG_LEVEL_4K;
+-		goto out;
+-	}
++	if (max_level == PG_LEVEL_4K)
++		return PG_LEVEL_4K;
+ 
+-	if (!slot_private) {
++	if (!kvm_slot_can_be_private(slot)) {
+ 		WARN_ON_ONCE(host_level != PG_LEVEL_NONE);
+-		host_level_used = host_pfn_mapping_level(kvm, gfn, slot);
++		host_level = host_pfn_mapping_level(kvm, gfn, slot);
+ 	}
+-	result = min(host_level_used, max_level);
+-
+-out:
+-	log_diag = cofunc_tdx_hp_diag_should_log(gfn,
+-						 &cofunc_tdx_hp_max_mapping_log_budget);
+-	if (log_diag)
+-		pr_info("CoFunc old-ABI face-GFN hugepage decision diagnostic: hp_max_mapping gfn=0x%llx hva=0x%lx original_max=%d capped_max=%d post_lpage_max=%d result=%d result_pages=%lu max_huge=%d host_in=%d host_used=%d host_pages=%lu slot_private=%d slot_flags=0x%lx dirty=%d l2_disallow=0x%lx l3_disallow=0x%lx first_disallowed=%d\n",
+-			(unsigned long long)gfn, hva,
+-			original_max_level, capped_max_level,
+-			post_lpage_max_level, result,
+-			cofunc_tdx_hp_pages_for_level(result),
+-			max_huge_page_level, host_level_in, host_level_used,
+-			cofunc_tdx_hp_pages_for_level(host_level_used),
+-			slot_private, slot ? (unsigned long)slot->flags : 0,
+-			dirty_track, l2_disallow, l3_disallow,
+-			first_disallowed_level);
+ 
+-	return result;
++	return min(host_level, max_level);
+ }
+ 
+ int kvm_mmu_max_mapping_level(struct kvm *kvm,
+@@ -3384,53 +3360,19 @@ void kvm_mmu_hugepage_adjust(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
+ {
+ 	struct kvm_memory_slot *slot = fault->slot;
+ 	kvm_pfn_t mask;
+-	int pfn_order = 0;
+-	bool log_diag = cofunc_tdx_hp_diag_should_log(fault->gfn,
+-						      &cofunc_tdx_hp_adjust_log_budget);
++	int pfn_order = -1;
++	int old_req_level;
+ 
+ 	fault->huge_page_disallowed = fault->exec && fault->nx_huge_page_workaround_enabled;
+ 
+-	if (unlikely(fault->max_level == PG_LEVEL_4K)) {
+-		if (log_diag)
+-			pr_info("CoFunc old-ABI face-GFN hugepage decision diagnostic: hp_adjust_exit reason=max_4k private=%d gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u slot_flags=0x%lx hva=0x%lx disallowed=%d\n",
+-				fault->is_private,
+-				(unsigned long long)fault->gfn,
+-				(unsigned long long)fault->pfn,
+-				fault->max_level, fault->req_level,
+-				fault->goal_level, fault->host_level,
+-				slot ? (unsigned long)slot->flags : 0,
+-				(unsigned long)fault->hva,
+-				fault->huge_page_disallowed);
++	if (unlikely(fault->max_level == PG_LEVEL_4K))
+ 		return;
+-	}
+ 
+-	if (is_error_noslot_pfn(fault->pfn)) {
+-		if (log_diag)
+-			pr_info("CoFunc old-ABI face-GFN hugepage decision diagnostic: hp_adjust_exit reason=noslot_pfn private=%d gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u slot_flags=0x%lx hva=0x%lx disallowed=%d\n",
+-				fault->is_private,
+-				(unsigned long long)fault->gfn,
+-				(unsigned long long)fault->pfn,
+-				fault->max_level, fault->req_level,
+-				fault->goal_level, fault->host_level,
+-				slot ? (unsigned long)slot->flags : 0,
+-				(unsigned long)fault->hva,
+-				fault->huge_page_disallowed);
++	if (is_error_noslot_pfn(fault->pfn))
+ 		return;
+-	}
+ 
+-	if (kvm_slot_dirty_track_enabled(slot)) {
+-		if (log_diag)
+-			pr_info("CoFunc old-ABI face-GFN hugepage decision diagnostic: hp_adjust_exit reason=dirty_track private=%d gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u slot_flags=0x%lx hva=0x%lx disallowed=%d\n",
+-				fault->is_private,
+-				(unsigned long long)fault->gfn,
+-				(unsigned long long)fault->pfn,
+-				fault->max_level, fault->req_level,
+-				fault->goal_level, fault->host_level,
+-				slot ? (unsigned long)slot->flags : 0,
+-				(unsigned long)fault->hva,
+-				fault->huge_page_disallowed);
++	if (kvm_slot_dirty_track_enabled(slot))
+ 		return;
+-	}
+ 
+ 	/*
+ 	 * Enforce the iTLB multihit workaround after capturing the requested
+@@ -3439,54 +3381,19 @@ void kvm_mmu_hugepage_adjust(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
+ 	fault->req_level = __kvm_mmu_max_mapping_level(vcpu->kvm, slot,
+ 						       fault->gfn, fault->max_level,
+ 						       fault->host_level);
+-	if (fault->is_private &&
+-	    fault->req_level == PG_LEVEL_4K &&
+-	    fault->max_level >= PG_LEVEL_2M &&
+-	    !fault->huge_page_disallowed &&
+-	    slot && !kvm_slot_can_be_private(slot) &&
+-	    fault->gfn >= COFUNC_TDX_HP_DIAG_MIN_GFN &&
+-	    fault->gfn < COFUNC_TDX_HP_DIAG_MAX_GFN &&
+-	    !(fault->gfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1)) &&
+-	    !(fault->pfn & (KVM_PAGES_PER_HPAGE(PG_LEVEL_2M) - 1)) &&
+-	    !cofunc_tdx_hp_lpage_disallow(fault->gfn, slot, PG_LEVEL_2M)) {
+-		pfn_order = cofunc_tdx_hp_pfn_order(fault->pfn);
+-		if (pfn_order >= KVM_HPAGE_GFN_SHIFT(PG_LEVEL_2M)) {
+-			pr_info("CoFunc old-ABI force private 2M diagnostic: override private=%d gfn=0x%llx pfn=0x%llx max=%u old_req=%u new_req=%u host=%u pfn_order=%d slot_private=%d slot_flags=0x%lx hva=0x%lx\n",
+-				fault->is_private,
+-				(unsigned long long)fault->gfn,
+-				(unsigned long long)fault->pfn,
+-				fault->max_level, fault->req_level,
+-				PG_LEVEL_2M, fault->host_level, pfn_order,
+-				slot && kvm_slot_can_be_private(slot),
+-				slot ? (unsigned long)slot->flags : 0,
+-				(unsigned long)fault->hva);
+-			fault->req_level = PG_LEVEL_2M;
+-		} else if (log_diag) {
+-			pr_info("CoFunc old-ABI force private 2M diagnostic: no_override reason=pfn_order private=%d gfn=0x%llx pfn=0x%llx max=%u req=%u host=%u pfn_order=%d slot_private=%d slot_flags=0x%lx hva=0x%lx\n",
+-				fault->is_private,
++	old_req_level = fault->req_level;
++	if (cofunc_tdx_oldabi_private_2m_capable(fault, &pfn_order)) {
++		fault->req_level = PG_LEVEL_2M;
++		if (atomic_dec_if_positive(&cofunc_tdx_oldabi_private_2m_log_budget) >= 0)
++			pr_info("CoFunc old-ABI private 2M promotion: gfn=0x%llx pfn=0x%llx max=%u old_req=%u new_req=%u host=%u pfn_order=%d slot_flags=0x%lx hva=0x%lx\n",
+ 				(unsigned long long)fault->gfn,
+ 				(unsigned long long)fault->pfn,
+-				fault->max_level, fault->req_level,
+-				fault->host_level, pfn_order,
+-				slot && kvm_slot_can_be_private(slot),
++				fault->max_level, old_req_level,
++				fault->req_level, fault->host_level,
++				pfn_order,
+ 				slot ? (unsigned long)slot->flags : 0,
+ 				(unsigned long)fault->hva);
+-		}
+ 	}
+-	if (log_diag)
+-		pr_info("CoFunc old-ABI face-GFN hugepage decision diagnostic: hp_adjust_result private=%d gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u req_pages=%lu slot_private=%d slot_flags=0x%lx hva=0x%lx disallowed=%d l2_disallow=0x%lx\n",
+-			fault->is_private,
+-			(unsigned long long)fault->gfn,
+-			(unsigned long long)fault->pfn,
+-			fault->max_level, fault->req_level, fault->goal_level,
+-			fault->host_level,
+-			cofunc_tdx_hp_pages_for_level(fault->req_level),
+-			slot && kvm_slot_can_be_private(slot),
+-			slot ? (unsigned long)slot->flags : 0,
+-			(unsigned long)fault->hva,
+-			fault->huge_page_disallowed,
+-			cofunc_tdx_hp_lpage_disallow(fault->gfn, slot,
+-						      PG_LEVEL_2M));
+ 	if (fault->req_level == PG_LEVEL_4K || fault->huge_page_disallowed)
+ 		return;
+ 
+@@ -3498,16 +3405,6 @@ void kvm_mmu_hugepage_adjust(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
+ 	mask = KVM_PAGES_PER_HPAGE(fault->goal_level) - 1;
+ 	VM_BUG_ON((fault->gfn & mask) != (fault->pfn & mask));
+ 	fault->pfn &= ~mask;
+-	if (log_diag)
+-		pr_info("CoFunc old-ABI face-GFN hugepage decision diagnostic: hp_adjust_goal private=%d gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u goal_pages=%lu slot_flags=0x%lx hva=0x%lx\n",
+-			fault->is_private,
+-			(unsigned long long)fault->gfn,
+-			(unsigned long long)fault->pfn,
+-			fault->max_level, fault->req_level, fault->goal_level,
+-			fault->host_level,
+-			cofunc_tdx_hp_pages_for_level(fault->goal_level),
+-			slot ? (unsigned long)slot->flags : 0,
+-			(unsigned long)fault->hva);
+ }
+ 
+ void disallowed_hugepage_adjust(struct kvm_page_fault *fault, u64 spte, int cur_level)

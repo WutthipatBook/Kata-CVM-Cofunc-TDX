@@ -1,0 +1,95 @@
+From 8f3706fd6f3f0b4f49c0537c6c4fb4c6c7d4ad18 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Tue, 7 Jul 2026 06:45:00 +0000
+Subject: [PATCH] KVM: Diagnostic suppress private TDP SPTE dirty tracking
+
+The private-TDP A/D suppression diagnostic skips the post-callback accessed
+and dirty-log helpers, but __handle_changed_spte() still runs an earlier
+generic kvm_set_pfn_dirty(old_pfn) for dirty old leaf SPTEs.
+
+For old-ABI TDX private memory, the PFN is a normal userspace-backed page.
+Marking the host page dirty while TDX private-SPTE teardown is in flight can
+leave PG_dirty on a page that later reaches the buddy allocator.  As a
+diagnostic, skip that generic dirty page-flag propagation for private TDP
+SPTEs too.
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 35 +++++++++++++++++++++++++++++++----
+ 1 file changed, 31 insertions(+), 4 deletions(-)
+
+--- a/arch/x86/kvm/mmu/tdp_mmu.c
++++ b/arch/x86/kvm/mmu/tdp_mmu.c
+@@ -415,27 +415,53 @@ static void handle_changed_spte_dirty_log(struct kvm *kvm, int as_id, gfn_t gfn
+ static atomic_t cofunc_tdx_private_spte_ad_log_budget = ATOMIC_INIT(256);
++static atomic_t cofunc_tdx_private_spte_dirty_log_budget = ATOMIC_INIT(256);
++
++static bool cofunc_tdx_private_spte_is_private_tdp(struct kvm *kvm,
++						   union kvm_mmu_page_role role)
++{
++	return kvm_gfn_shared_mask(kvm) && kvm_mmu_page_role_is_private(role);
++}
+ 
+ static bool cofunc_tdx_private_spte_skip_ad_track(struct kvm *kvm,
+ 						  union kvm_mmu_page_role role,
+ 						  gfn_t gfn, u64 old_spte,
+ 						  u64 new_spte, int level)
+ {
+-	if (!kvm_gfn_shared_mask(kvm) || !kvm_mmu_page_role_is_private(role))
++	if (!cofunc_tdx_private_spte_is_private_tdp(kvm, role))
+ 		return false;
+ 
+ 	if (!is_shadow_present_pte(old_spte) || !is_last_spte(old_spte, level))
+ 		return true;
+ 
+ 	if (atomic_dec_if_positive(&cofunc_tdx_private_spte_ad_log_budget) >= 0)
+ 		pr_info("CoFunc old-ABI private TDP SPTE A/D suppress: gfn=0x%llx pfn=0x%llx level=%d old_accessed=%d old_dirty=%d new_present=%d new_accessed=%d new_dirty=%d\n",
+ 			(unsigned long long)gfn,
+ 			(unsigned long long)spte_to_pfn(old_spte),
+ 			level,
+ 			is_accessed_spte(old_spte),
+ 			is_dirty_spte(old_spte),
+ 			is_shadow_present_pte(new_spte),
+ 			is_accessed_spte(new_spte),
+ 			is_dirty_spte(new_spte));
+ 	return true;
+ }
+ 
++static bool cofunc_tdx_private_spte_skip_dirty_track(struct kvm *kvm,
++						     union kvm_mmu_page_role role,
++						     gfn_t gfn, u64 old_spte,
++						     u64 new_spte, int level)
++{
++	if (!cofunc_tdx_private_spte_is_private_tdp(kvm, role))
++		return false;
++
++	if (atomic_dec_if_positive(&cofunc_tdx_private_spte_dirty_log_budget) >= 0)
++		pr_info("CoFunc old-ABI private TDP SPTE dirty suppress: gfn=0x%llx pfn=0x%llx level=%d old_accessed=%d old_dirty=%d new_present=%d new_accessed=%d new_dirty=%d\n",
++			(unsigned long long)gfn,
++			(unsigned long long)spte_to_pfn(old_spte),
++			level,
++			is_accessed_spte(old_spte), is_dirty_spte(old_spte),
++			is_shadow_present_pte(new_spte), is_accessed_spte(new_spte),
++			is_dirty_spte(new_spte));
++	return true;
++}
++
+ /**
+  * tdp_mmu_unlink_sp() - Remove a shadow page from the list of used pages
+  * @kvm: kvm instance
+@@ -719,9 +745,12 @@ static void __handle_changed_spte(struct kvm *kvm, int as_id, gfn_t gfn,
+ 	if (is_leaf != was_leaf)
+ 		kvm_update_page_stats(kvm, level, is_leaf ? 1 : -1);
+ 
+-	if (was_leaf && is_dirty_spte(old_spte) &&
+-	    (!is_present || !is_dirty_spte(new_spte) || pfn_changed))
+-		kvm_set_pfn_dirty(old_pfn);
++	if (was_leaf && is_dirty_spte(old_spte) &&
++	    (!is_present || !is_dirty_spte(new_spte) || pfn_changed)) {
++		if (!cofunc_tdx_private_spte_skip_dirty_track(kvm, role, gfn,
++							      old_spte, new_spte, level))
++			kvm_set_pfn_dirty(old_pfn);
++	}
+ 
+ 	/*
+ 	 * Recursively handle child PTs if the change removed a subtree from
+-- 
+2.43.0

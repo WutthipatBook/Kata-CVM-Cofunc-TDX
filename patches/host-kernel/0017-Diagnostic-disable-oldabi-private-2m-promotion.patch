@@ -1,0 +1,57 @@
+From 5832d3d08a77e9dbd6737200fed6bb0b477c4e7f Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Tue, 7 Jul 2026 05:20:00 +0000
+Subject: [PATCH] KVM: Diagnostic disable old-ABI private 2M promotion
+
+The guarded old-ABI Fig. 11 smoke/churn run reports bad free pages with
+PG_referenced and PG_dirty set.  The bad PFNs include 2M-aligned ranges and
+many adjacent 4K tail pages, which makes the old-ABI private 2M promotion path
+a plausible trigger.
+
+For an A/B run, leave the promotion guard and diagnostics in place but force
+the helper to return false after it proves that a private 2M mapping would have
+been eligible.  This keeps the rest of the current diagnostics unchanged while
+forcing the normal 4K TDP path for old-ABI private mappings.
+---
+ arch/x86/kvm/mmu/mmu.c | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+--- a/arch/x86/kvm/mmu/mmu.c
++++ b/arch/x86/kvm/mmu/mmu.c
+@@ -3270,6 +3270,7 @@ static unsigned long cofunc_tdx_oldabi_lpage_disallow(gfn_t gfn,
+ }
+ 
+ static atomic_t cofunc_tdx_oldabi_private_2m_log_budget = ATOMIC_INIT(64);
++static atomic_t cofunc_tdx_oldabi_private_2m_disabled_log_budget = ATOMIC_INIT(64);
+ 
+ static unsigned long cofunc_tdx_oldabi_lpage_disallow(gfn_t gfn,
+ 						      const struct kvm_memory_slot *slot,
+@@ -3322,7 +3323,25 @@ static bool cofunc_tdx_oldabi_private_2m_capable(struct kvm_page_fault *fault,
+ 	if (pfn_order)
+ 		*pfn_order = order;
+ 
+-	return order >= KVM_HPAGE_GFN_SHIFT(PG_LEVEL_2M);
++	if (order < KVM_HPAGE_GFN_SHIFT(PG_LEVEL_2M))
++		return false;
++
++	if (atomic_dec_if_positive(&cofunc_tdx_oldabi_private_2m_disabled_log_budget) >= 0)
++		pr_info("CoFunc old-ABI private 2M promotion disabled diagnostic: gfn=0x%llx pfn=0x%llx max=%u req=%u host=%u pfn_order=%d slot_flags=0x%lx hva=0x%lx\n",
++			(unsigned long long)fault->gfn,
++			(unsigned long long)fault->pfn,
++			fault->max_level,
++			fault->req_level,
++			fault->host_level,
++			order,
++			slot ? (unsigned long)slot->flags : 0,
++			(unsigned long)fault->hva);
++
++	/*
++	 * Diagnostic A/B: this old-ABI private fault would be eligible for a
++	 * 2M SPTE, but force the baseline 4K mapping path.
++	 */
++	return false;
+ }
+ 
+ static int __kvm_mmu_max_mapping_level(struct kvm *kvm,
+-- 
+2.43.0

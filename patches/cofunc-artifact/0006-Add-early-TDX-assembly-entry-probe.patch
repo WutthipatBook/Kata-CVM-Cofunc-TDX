@@ -1,0 +1,68 @@
+--- a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
++++ b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
+@@ -19,6 +19,10 @@
+ #define KCODE      0xFFFFFFFFC0000000
+ #define PADDR(x)   ((x) - KCODE)
+ #define KSTACKSIZE (4*0x1000)
++#define TDVMCALL_EXPOSE_REGS_MASK 0xfc00
++#define VMCALL_SC_REQUEST 0x10011
++#define SC_REQ_DEBUG_PUTC 1
++
+ 
+ /* linker.ld provides: edata and end */
+ 
+@@ -72,6 +76,18 @@
+         .long 8
+ multiboot_header_end:
+ 
++.macro TDX_BOOT_PUTC char
++	xor %eax, %eax
++	movl $TDVMCALL_EXPOSE_REGS_MASK, %ecx
++	xor %r10d, %r10d
++	movq $VMCALL_SC_REQUEST, %r11
++	movq $SC_REQ_DEBUG_PUTC, %r12
++	movq $\char, %r13
++	xor %r14d, %r14d
++	xor %r15d, %r15d
++	.byte 0x66, 0x0f, 0x01, 0xcc
++.endm
++
+ /* Entry point: running in 64-bit mode */
+ .code64
+ EXPORT(_start)
+@@ -80,6 +96,17 @@
+ 
+ 	/* set init stack */
+ 	movl $PADDR(stack+KSTACKSIZE), %esp
++	pushq %rdi
++	pushq %rsi
++	TDX_BOOT_PUTC 91
++	TDX_BOOT_PUTC 65
++	TDX_BOOT_PUTC 83
++	TDX_BOOT_PUTC 77
++	TDX_BOOT_PUTC 48
++	TDX_BOOT_PUTC 93
++	TDX_BOOT_PUTC 10
++	popq %rsi
++	popq %rdi
+ 
+ 	/* zero bss */
+ 	movl %edi, %edx
+@@ -109,6 +136,17 @@
+ 	/* load VA stack */
+ 	movabsq $(stack+KSTACKSIZE), %rsp
+ 	movq $0, %rbp
++	pushq %rdi
++	pushq %rsi
++	TDX_BOOT_PUTC 91
++	TDX_BOOT_PUTC 65
++	TDX_BOOT_PUTC 83
++	TDX_BOOT_PUTC 77
++	TDX_BOOT_PUTC 49
++	TDX_BOOT_PUTC 93
++	TDX_BOOT_PUTC 10
++	popq %rsi
++	popq %rdi
+ 	call main
+ 	/* Un-reachable */
+ 	jmp .

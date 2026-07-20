@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000025 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Wed, 15 Jul 2026 00:00:00 +0000
+Subject: [PATCH] KVM: Make old-ABI 4K containment telemetry conclusive
+
+The first patch-0023 smoke completed successfully and all safety gates
+stayed ready, but verbose per-4K teardown diagnostics overflowed /dev/kmsg.
+The existing containment marker was also emitted only when the normal
+mapping request exceeded 4K, so its absence did not show whether the
+containment branch ran.
+
+Log the first 64 entries into the old-ABI private normal-slot containment
+branch regardless of the incoming mapping level, including whether the cap
+changed the request.  Keep a bounded sample of TDP adjust and target-level
+events, but disable older per-page PFN, A/D, release, and unpin
+diagnostics.  Limit SEPT lifecycle telemetry to huge mappings; SEAMCALL
+error diagnostics remain unchanged.
+
+This is a logging-only follow-up to patch 0023.  It does not change the 4K
+cap, mapping decisions, SPTE updates, or TDX SEAMCALL handling.
+
+Signed-off-by: Codex <codex@local>
+---
+diff --git a/arch/x86/kvm/mmu/mmu.c b/arch/x86/kvm/mmu/mmu.c
+--- a/arch/x86/kvm/mmu/mmu.c
++++ b/arch/x86/kvm/mmu/mmu.c
+@@ -3408,12 +3408,12 @@
+ 	 * helper has been disabled.
+ 	 */
+ 	if (fault->is_private && slot && !kvm_slot_can_be_private(slot)) {
+-		if (fault->req_level > PG_LEVEL_4K &&
+-		    atomic_dec_if_positive(&cofunc_tdx_oldabi_private_4k_log_budget) >= 0)
+-			pr_info("CoFunc old-ABI private mapping forced to 4K: gfn=0x%llx pfn=0x%llx normal_req=%u capped_req=%u max=%u host=%u slot_flags=0x%lx hva=0x%lx\n",
++		if (atomic_dec_if_positive(&cofunc_tdx_oldabi_private_4k_log_budget) >= 0)
++			pr_info("CoFunc old-ABI private 4K containment: gfn=0x%llx pfn=0x%llx normal_req=%u capped_req=%u would_cap=%d max=%u host=%u slot_flags=0x%lx hva=0x%lx\n",
+ 				(unsigned long long)fault->gfn,
+ 				(unsigned long long)fault->pfn,
+-				fault->req_level, PG_LEVEL_4K, fault->max_level,
++				fault->req_level, PG_LEVEL_4K,
++				fault->req_level > PG_LEVEL_4K, fault->max_level,
+ 				fault->host_level, (unsigned long)slot->flags,
+ 				(unsigned long)fault->hva);
+ 		fault->req_level = PG_LEVEL_4K;
+@@ -4676,7 +4676,7 @@
+  */
+ #define COFUNC_TDX_DIAG_MIN_GFN	0x500000ULL
+ #define COFUNC_TDX_DIAG_MAX_GFN	0x800000ULL
+-static atomic_t cofunc_tdx_private_pfn_log_budget = ATOMIC_INIT(1024);
++static atomic_t cofunc_tdx_private_pfn_log_budget = ATOMIC_INIT(0);
+ 
+ static bool cofunc_tdx_mmu_diag_should_log(gfn_t gfn, atomic_t *budget)
+ {
+@@ -4847,7 +4847,7 @@
+ 	       mmu_updating_retry_gfn(vcpu->kvm, mmu_seq, fault->gfn);
+ }
+ 
+-static atomic_t cofunc_tdx_oldabi_release_log_budget = ATOMIC_INIT(256);
++static atomic_t cofunc_tdx_oldabi_release_log_budget = ATOMIC_INIT(0);
+ 
+ static void cofunc_tdx_oldabi_clear_page_ad_flags(struct page *page)
+ {
+diff --git a/arch/x86/kvm/mmu/tdp_mmu.c b/arch/x86/kvm/mmu/tdp_mmu.c
+--- a/arch/x86/kvm/mmu/tdp_mmu.c
++++ b/arch/x86/kvm/mmu/tdp_mmu.c
+@@ -20,8 +20,8 @@
+  */
+ #define COFUNC_TDX_TDP_DIAG_MIN_GFN	0x500000ULL
+ #define COFUNC_TDX_TDP_DIAG_MAX_GFN	0x800000ULL
+-static atomic_t cofunc_tdx_tdp_adjust_log_budget = ATOMIC_INIT(1024);
+-static atomic_t cofunc_tdx_tdp_target_log_budget = ATOMIC_INIT(1024);
++static atomic_t cofunc_tdx_tdp_adjust_log_budget = ATOMIC_INIT(64);
++static atomic_t cofunc_tdx_tdp_target_log_budget = ATOMIC_INIT(64);
+ 
+ static bool cofunc_tdx_tdp_diag_should_log(gfn_t gfn, atomic_t *budget)
+ {
+@@ -412,8 +412,8 @@
+ 	}
+ }
+ 
+-static atomic_t cofunc_tdx_private_spte_ad_log_budget = ATOMIC_INIT(256);
+-static atomic_t cofunc_tdx_private_spte_dirty_log_budget = ATOMIC_INIT(256);
++static atomic_t cofunc_tdx_private_spte_ad_log_budget = ATOMIC_INIT(0);
++static atomic_t cofunc_tdx_private_spte_dirty_log_budget = ATOMIC_INIT(0);
+ 
+ static bool cofunc_tdx_oldabi_spte_uses_normal_memslot(struct kvm *kvm,
+ 						       int as_id, gfn_t gfn,
+diff --git a/arch/x86/kvm/vmx/tdx.c b/arch/x86/kvm/vmx/tdx.c
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -1855,7 +1855,7 @@
+ 	td_vmcs_write64(to_tdx(vcpu), SHARED_EPT_POINTER, root_hpa & PAGE_MASK);
+ }
+ 
+-static atomic_t cofunc_tdx_unpin_log_budget = ATOMIC_INIT(256);
++static atomic_t cofunc_tdx_unpin_log_budget = ATOMIC_INIT(0);
+ static atomic_t cofunc_tdx_sept_change_log_budget = ATOMIC_INIT(2048);
+ static atomic_t cofunc_tdx_sept_error_log_budget = ATOMIC_INIT(512);
+ 
+@@ -1942,6 +1942,9 @@
+ {
+ 	struct kvm_tdx *kvm_tdx = to_kvm_tdx(kvm);
+ 
++	if (change->level <= PG_LEVEL_4K)
++		return;
++
+ 	if (!cofunc_tdx_take_log_budget(&cofunc_tdx_sept_change_log_budget))
+ 		return;
+ 
+-- 
+2.43.0

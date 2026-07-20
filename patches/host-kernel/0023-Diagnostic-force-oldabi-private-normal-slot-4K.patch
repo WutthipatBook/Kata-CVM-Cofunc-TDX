@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000023 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Wed, 15 Jul 2026 00:00:00 +0000
+Subject: [PATCH] KVM: Force old-ABI private normal-slot mappings to 4K
+
+Patch 0017 disables only cofunc_tdx_oldabi_private_2m_capable(), the custom
+4K-to-2M promotion helper.  It does not prevent
+__kvm_mmu_max_mapping_level() from selecting a 2M mapping when the normal
+host HVA walk sees a THP-backed PMD.
+
+That distinction matters for the Vanilla Kata-TDX containment A/B.  A run
+with patch 0017 still logged a live private level-2 split.  Two preserved
+failures show KVM operating on 4K children while the TDX module encounters
+a blocked level-1 SEPT ancestor.  Therefore the earlier run was not a true
+4K-only test.
+
+For old-ABI TDX private faults backed by a normal memslot, cap the normal
+KVM mapping decision at PG_LEVEL_4K and return before the custom promotion
+helper.  Log cases where the ordinary KVM decision would have installed a
+larger mapping.  Shared mappings and private-capable memslots keep their
+normal KVM policy.
+
+This is a conservative Vanilla Kata containment diagnostic.  It is not a
+fix for the underlying SEPT split-state bug.  It also disables the CoFunc
+private 2M optimization, so CoFunc measurements must not be collected with
+this module.
+
+Signed-off-by: Codex <codex@local>
+---
+ arch/x86/kvm/mmu/mmu.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/arch/x86/kvm/mmu/mmu.c b/arch/x86/kvm/mmu/mmu.c
+--- a/arch/x86/kvm/mmu/mmu.c
++++ b/arch/x86/kvm/mmu/mmu.c
+@@ -3267,6 +3267,7 @@ out:
+ }
+ 
+ static atomic_t cofunc_tdx_oldabi_private_2m_log_budget = ATOMIC_INIT(64);
++static atomic_t cofunc_tdx_oldabi_private_4k_log_budget = ATOMIC_INIT(64);
+ static atomic_t cofunc_tdx_oldabi_private_2m_disabled_log_budget = ATOMIC_INIT(64);
+ 
+ static unsigned long cofunc_tdx_oldabi_lpage_disallow(gfn_t gfn,
+@@ -3400,6 +3401,25 @@ void kvm_mmu_hugepage_adjust(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault)
+ 	fault->req_level = __kvm_mmu_max_mapping_level(vcpu->kvm, slot,
+ 						       fault->gfn, fault->max_level,
+ 						       fault->host_level);
++
++	/*
++	 * Vanilla old-ABI TDX containment: normal host THP policy must not
++	 * silently restore private 2M mappings after the custom promotion
++	 * helper has been disabled.
++	 */
++	if (fault->is_private && slot && !kvm_slot_can_be_private(slot)) {
++		if (fault->req_level > PG_LEVEL_4K &&
++		    atomic_dec_if_positive(&cofunc_tdx_oldabi_private_4k_log_budget) >= 0)
++			pr_info("CoFunc old-ABI private mapping forced to 4K: gfn=0x%llx pfn=0x%llx normal_req=%u capped_req=%u max=%u host=%u slot_flags=0x%lx hva=0x%lx\n",
++				(unsigned long long)fault->gfn,
++				(unsigned long long)fault->pfn,
++				fault->req_level, PG_LEVEL_4K, fault->max_level,
++				fault->host_level, (unsigned long)slot->flags,
++				(unsigned long)fault->hva);
++		fault->req_level = PG_LEVEL_4K;
++		return;
++	}
++
+ 	old_req_level = fault->req_level;
+ 	if (cofunc_tdx_oldabi_private_2m_capable(fault, &pfn_order)) {
+ 		fault->req_level = PG_LEVEL_2M;
+-- 
+2.43.0

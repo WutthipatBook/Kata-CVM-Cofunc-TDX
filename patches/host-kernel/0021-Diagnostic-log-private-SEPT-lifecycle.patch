@@ -1,0 +1,216 @@
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -2,6 +2,7 @@
+ #include <linux/cpu.h>
+ #include <linux/kvm_para.h>
+ #include <linux/mmu_context.h>
++#include <linux/sched.h>
+ #include <linux/misc_cgroup.h>
+ 
+ #include <asm/fpu/xcr.h>
+@@ -1855,6 +1856,8 @@
+ }
+ 
+ static atomic_t cofunc_tdx_unpin_log_budget = ATOMIC_INIT(256);
++static atomic_t cofunc_tdx_sept_change_log_budget = ATOMIC_INIT(2048);
++static atomic_t cofunc_tdx_sept_error_log_budget = ATOMIC_INIT(512);
+ 
+ static void cofunc_tdx_clear_page_ad_flags(struct page *page)
+ {
+@@ -1929,6 +1932,60 @@
+ 	}
+ }
+ 
++static bool cofunc_tdx_take_log_budget(atomic_t *budget)
++{
++	return atomic_dec_if_positive(budget) >= 0;
++}
++
++static void cofunc_tdx_log_sept_change(struct kvm *kvm, const char *where,
++				       const struct kvm_spte_change *change)
++{
++	struct kvm_tdx *kvm_tdx = to_kvm_tdx(kvm);
++
++	if (!cofunc_tdx_take_log_budget(&cofunc_tdx_sept_change_log_budget))
++		return;
++
++	pr_info("CoFunc old-ABI TDX SEPT change: where=%s gfn=0x%llx level=%u old_pfn=0x%llx old_present=%d old_last=%d old_private_zapped=%d new_pfn=0x%llx new_present=%d new_last=%d new_private_zapped=%d sept_page=%px hkid=%d assigned=%d blocked=%d task=%s/%d\n",
++		where,
++		(unsigned long long)change->gfn,
++		change->level,
++		(unsigned long long)change->old.pfn,
++		change->old.is_present,
++		change->old.is_last,
++		change->old.is_private_zapped,
++		(unsigned long long)change->new.pfn,
++		change->new.is_present,
++		change->new.is_last,
++		change->new.is_private_zapped,
++		change->sept_page,
++		kvm_tdx->hkid,
++		is_hkid_assigned(kvm_tdx),
++		READ_ONCE(kvm_tdx->has_range_blocked),
++		current->comm,
++		current->pid);
++}
++
++static void cofunc_tdx_log_sept_seamcall_failure(struct kvm *kvm,
++						 const char *op, gfn_t gfn,
++						 enum pg_level level,
++						 kvm_pfn_t pfn, u64 err,
++						 const struct tdx_module_output *out)
++{
++	struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
++	struct kvm_tdx *kvm_tdx = to_kvm_tdx(kvm);
++
++	if (!cofunc_tdx_take_log_budget(&cofunc_tdx_sept_error_log_budget))
++		return;
++
++	pr_err("CoFunc old-ABI TDX SEPT seamcall failure context: op=%s gfn=0x%llx gpa=0x%llx level=%u tdx_level=%d pfn=0x%llx err=0x%llx out_rcx=0x%llx out_rdx=0x%llx out_r8=0x%llx out_r9=0x%llx slot_private=%d hkid=%d assigned=%d blocked=%d task=%s/%d\n",
++	       op, (unsigned long long)gfn, (unsigned long long)gfn_to_gpa(gfn),
++	       level, pg_level_to_tdx_sept_level(level), (unsigned long long)pfn,
++	       err, out ? out->rcx : 0, out ? out->rdx : 0, out ? out->r8 : 0,
++	       out ? out->r9 : 0, slot ? kvm_slot_can_be_private(slot) : -1,
++	       kvm_tdx->hkid, is_hkid_assigned(kvm_tdx),
++	       READ_ONCE(kvm_tdx->has_range_blocked), current->comm, current->pid);
++}
++
+ static void __tdx_sept_set_private_spte(struct kvm *kvm, gfn_t gfn,
+ 					enum pg_level level, kvm_pfn_t pfn)
+ {
+@@ -2016,6 +2073,8 @@
+ 		err = tdh_mem_page_remove(kvm_tdx->tdr.pa, gpa, tdx_level, &out);
+ 		spin_unlock(&kvm_tdx->seamcall_lock);
+ 		if (KVM_BUG_ON(err, kvm)) {
++			cofunc_tdx_log_sept_seamcall_failure(kvm, "page_remove",
++							     gfn, level, pfn, err, &out);
+ 			pr_tdx_error(TDH_MEM_PAGE_REMOVE, err, &out);
+ 			return;
+ 		}
+@@ -2062,6 +2121,8 @@
+ 	err = tdh_mem_sept_add(kvm_tdx->tdr.pa, gpa, tdx_level, hpa, &out);
+ 	spin_unlock(&kvm_tdx->seamcall_lock);
+ 	if (KVM_BUG_ON(err, kvm)) {
++		cofunc_tdx_log_sept_seamcall_failure(kvm, "sept_add",
++						     gfn, level, 0, err, &out);
+ 		pr_tdx_error(TDH_MEM_SEPT_ADD, err, &out);
+ 		return -EIO;
+ 	}
+@@ -2084,6 +2145,8 @@
+ 	err = tdh_mem_page_demote(kvm_tdx->tdr.pa, gpa, tdx_level, hpa, &out);
+ 	spin_unlock(&kvm_tdx->seamcall_lock);
+ 	if (KVM_BUG_ON(err, kvm)) {
++		cofunc_tdx_log_sept_seamcall_failure(kvm, "page_demote",
++						     gfn, level, 0, err, &out);
+ 		pr_tdx_error(TDH_MEM_PAGE_DEMOTE, err, &out);
+ 		return -EIO;
+ 	}
+@@ -2103,8 +2166,11 @@
+ 	spin_lock(&kvm_tdx->seamcall_lock);
+ 	err = tdh_mem_range_block(kvm_tdx->tdr.pa, gpa, tdx_level, &out);
+ 	spin_unlock(&kvm_tdx->seamcall_lock);
+-	if (KVM_BUG_ON(err, kvm))
++	if (KVM_BUG_ON(err, kvm)) {
++		cofunc_tdx_log_sept_seamcall_failure(kvm, "range_block",
++						     gfn, level, 0, err, &out);
+ 		pr_tdx_error(TDH_MEM_RANGE_BLOCK, err, &out);
++	}
+ 
+ 	WRITE_ONCE(kvm_tdx->has_range_blocked, true);
+ }
+@@ -2169,8 +2235,11 @@
+ 	spin_lock(&kvm_tdx->seamcall_lock);
+ 	err = tdh_mem_range_unblock(kvm_tdx->tdr.pa, gpa, tdx_level, &out);
+ 	spin_unlock(&kvm_tdx->seamcall_lock);
+-	if (KVM_BUG_ON(err, kvm))
++	if (KVM_BUG_ON(err, kvm)) {
++		cofunc_tdx_log_sept_seamcall_failure(kvm, "range_unblock",
++						     gfn, level, 0, err, &out);
+ 		pr_tdx_error(TDH_MEM_RANGE_UNBLOCK, err, &out);
++	}
+ }
+ 
+ static int tdx_sept_free_private_sp(struct kvm *kvm, gfn_t gfn, enum pg_level level,
+@@ -2206,6 +2275,10 @@
+ 		err = tdh_mem_range_block(kvm_tdx->tdr.pa, parent_gpa,
+ 					parent_tdx_level, &out);
+ 		if (KVM_BUG_ON(err, kvm)) {
++			cofunc_tdx_log_sept_seamcall_failure(kvm,
++							     "sept_parent_range_block",
++							     gpa_to_gfn(parent_gpa),
++							     level + 1, 0, err, &out);
+ 			pr_tdx_error(TDH_MEM_RANGE_BLOCK, err, &out);
+ 			return -EIO;
+ 		}
+@@ -2215,6 +2288,10 @@
+ 		err = tdh_mem_sept_remove(kvm_tdx->tdr.pa, parent_gpa,
+ 					parent_tdx_level, &out);
+ 		if (KVM_BUG_ON(err, kvm)) {
++			cofunc_tdx_log_sept_seamcall_failure(kvm,
++							     "sept_remove",
++							     gpa_to_gfn(parent_gpa),
++							     level + 1, 0, err, &out);
+ 			pr_tdx_error(TDH_MEM_PAGE_REMOVE, err, &out);
+ 			return -EIO;
+ 		}
+@@ -2275,6 +2352,8 @@
+ 	WARN_ON(!change->old.is_private_zapped);
+ 	WARN_ON(change->new.is_private_zapped);
+ 
++	cofunc_tdx_log_sept_change(kvm, "private_zapped-entry", change);
++
+ 	/*
+ 	 * Handle special case of old_spte being temporarily blocked private
+ 	 * SPTE.  There are two cases: 1) Need to restore the original mapping
+@@ -2290,11 +2369,15 @@
+ 		lockdep_assert_held(&kvm->mmu_lock);
+ 
+ 		if (change->old.pfn == change->new.pfn) {
++			cofunc_tdx_log_sept_change(kvm, "private_zapped-unzap", change);
+ 			tdx_sept_unzap_private_spte(kvm, change->gfn, change->level);
+ 		} else if (change->level > PG_LEVEL_4K &&
+ 			   change->old.is_last && !change->new.is_last) {
+ 			int i;
+ 
++			cofunc_tdx_log_sept_change(kvm,
++						   "private_zapped-split-block-children",
++						   change);
+ 			/* This large SPTE is blocked already. */
+ 			tdx_sept_split_private_spte(kvm, change->gfn, change->level, change->sept_page);
+ 			/* Block on newly splited SPTEs as parent SPTE as blocked. */
+@@ -2322,6 +2405,7 @@
+ 		lockdep_assert_held_write(&kvm->mmu_lock);
+ 		if (is_hkid_assigned(kvm_tdx))
+ 			tdx_track(kvm_tdx);
++		cofunc_tdx_log_sept_change(kvm, "private_zapped-drop", change);
+ 		tdx_sept_drop_private_spte(kvm, change->gfn, change->level,
+ 					change->old.pfn);
+ 	}
+@@ -2339,8 +2423,11 @@
+ 	WARN_ON(!is_td(kvm));
+ 	lockdep_assert_held(&kvm->mmu_lock);
+ 
++	cofunc_tdx_log_sept_change(kvm, "changed-entry", change);
++
+ 	if (change->new.is_present) {
+ 		if (level > PG_LEVEL_4K && was_leaf && !is_leaf) {
++			cofunc_tdx_log_sept_change(kvm, "changed-live-split", change);
+ 			tdx_sept_zap_private_spte(kvm, gfn, level);
+ 			tdx_sept_tlb_remote_flush(kvm);
+ 			tdx_sept_split_private_spte(kvm, gfn, level, change->sept_page);
+@@ -2362,6 +2449,7 @@
+ 		 * Zap private leaf SPTE.  Zapping private table is done
+ 		 * below in handle_removed_tdp_mmu_page().
+ 		 */
++		cofunc_tdx_log_sept_change(kvm, "changed-zap-leaf", change);
+ 		tdx_sept_zap_private_spte(kvm, gfn, level);
+ 
+ 		if (change->new.is_private_zapped) {
+@@ -2378,6 +2466,7 @@
+ 			if (is_hkid_assigned(kvm_tdx))
+ 				tdx_track(kvm_tdx);
+ 
++			cofunc_tdx_log_sept_change(kvm, "changed-drop-leaf", change);
+ 			tdx_sept_drop_private_spte(kvm, gfn, level, change->old.pfn);
+ 		}
+ 	}

@@ -1,0 +1,28 @@
+From 5a090de39d9b0bb0f5d5b09d43b2dd22a9ad854e Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Tue, 7 Jul 2026 06:36:00 +0000
+Subject: [PATCH] KVM: Fix private TDP dirty suppression callsite
+
+Apply the callsite half of 0018 to a tree where the helper half was already
+applied before the build caught the missing reference.
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+--- a/arch/x86/kvm/mmu/tdp_mmu.c
++++ b/arch/x86/kvm/mmu/tdp_mmu.c
+@@ -747,6 +747,9 @@ static void __handle_changed_spte(struct kvm *kvm, int as_id, gfn_t gfn,
+ 
+ 	if (was_leaf && is_dirty_spte(old_spte) &&
+-	    (!is_present || !is_dirty_spte(new_spte) || pfn_changed))
+-		kvm_set_pfn_dirty(old_pfn);
++	    (!is_present || !is_dirty_spte(new_spte) || pfn_changed)) {
++		if (!cofunc_tdx_private_spte_skip_dirty_track(kvm, role, gfn,
++							      old_spte, new_spte, level))
++			kvm_set_pfn_dirty(old_pfn);
++	}
+ 
+ 	/*
+ 	 * Recursively handle child PTs if the change removed a subtree from
+-- 
+2.43.0

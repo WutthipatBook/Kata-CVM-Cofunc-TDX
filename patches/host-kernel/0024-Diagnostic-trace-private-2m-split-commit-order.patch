@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000024 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Wed, 15 Jul 2026 00:00:00 +0000
+Subject: [PATCH] KVM: Trace private 2M split commit ordering
+
+Two old-ABI TDX failures show KVM operating on 4K private TDP leaves while
+the TDX module still reports a blocked 2M SEPT ancestor.  The 2022 TDP
+split path publishes a software non-leaf and invokes a void protected-page
+table callback, so a failed TDH.MEM.PAGE.DEMOTE cannot be returned to the
+caller or roll back the software SPTE.
+
+Trace only private hugepage split transitions.  Correlate the TDP caller
+and its MMU lock mode with the live or already-blocked TDX path, and record
+the PAGE.DEMOTE result and output registers on both success and failure.
+Do not budget SEAMCALL failure context, because an earlier VM can exhaust
+the existing global budget before the relevant failure.
+
+This patch is diagnostic only.  It does not alter split decisions, callback
+return semantics, or recovery behavior.
+
+Signed-off-by: Codex <codex@local>
+---
+diff --git a/arch/x86/kvm/mmu/tdp_mmu.c b/arch/x86/kvm/mmu/tdp_mmu.c
+--- a/arch/x86/kvm/mmu/tdp_mmu.c
++++ b/arch/x86/kvm/mmu/tdp_mmu.c
+@@ -8,6 +8,7 @@
+ #include "spte.h"
+ 
+ #include <linux/atomic.h>
++#include <linux/sched.h>
+ #include <asm/cmpxchg.h>
+ #include <trace/events/kvm.h>
+ 
+@@ -2007,6 +2008,8 @@
+ {
+ 	const u64 huge_spte = iter->old_spte;
+ 	const int level = iter->level;
++	const bool private_split = is_private_sptep(iter->sptep) &&
++				   level > PG_LEVEL_4K;
+ 	int ret, i;
+ 
+ 	tdp_mmu_init_sp(sp, iter->sptep, iter->gfn);
+@@ -2018,6 +2021,19 @@
+ 	for (i = 0; i < SPTE_ENT_PER_PAGE; i++)
+ 		sp->spt[i] = make_huge_page_split_spte(kvm, huge_spte, sp->role, i);
+ 
++	if (private_split)
++		pr_info("CoFunc old-ABI TDX private split commit: phase=tdp-begin kvm=%p gfn=0x%llx level=%d shared=%d old_spte=0x%llx old_pfn=0x%llx old_private_zapped=%d child_sp=%p task=%s/%d\n",
++			kvm,
++			(unsigned long long)iter->gfn,
++			level,
++			shared,
++			(unsigned long long)huge_spte,
++			(unsigned long long)spte_to_pfn(huge_spte),
++			is_private_zapped_spte(huge_spte),
++			sp,
++			current->comm,
++			current->pid);
++
+ 	/*
+ 	 * Replace the huge spte with a pointer to the populated lower level
+ 	 * page table. Since we are making this change without a TLB flush vCPUs
+@@ -2037,7 +2053,24 @@
+ 	 */
+ 	kvm_update_page_stats(kvm, level - 1, SPTE_ENT_PER_PAGE);
+ 
++	if (private_split)
++		pr_info("CoFunc old-ABI TDX private split commit: phase=tdp-end kvm=%p gfn=0x%llx level=%d shared=%d ret=%d linked=%d current_spte=0x%llx task=%s/%d\n",
++			kvm,
++			(unsigned long long)iter->gfn,
++			level,
++			shared,
++			ret,
++			!ret,
++			(unsigned long long)kvm_tdp_mmu_read_spte(iter->sptep),
++			current->comm,
++			current->pid);
++
+ out:
++	if (private_split && ret)
++		pr_info("CoFunc old-ABI TDX private split commit: phase=tdp-end kvm=%p gfn=0x%llx level=%d shared=%d ret=%d linked=0 current_spte=0x%llx task=%s/%d\n",
++			kvm, (unsigned long long)iter->gfn, level, shared, ret,
++			(unsigned long long)kvm_tdp_mmu_read_spte(iter->sptep),
++			current->comm, current->pid);
+ 	trace_kvm_mmu_split_huge_page(iter->gfn, huge_spte, level, ret);
+ 	return ret;
+ }
+diff --git a/arch/x86/kvm/vmx/tdx.c b/arch/x86/kvm/vmx/tdx.c
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -1857,7 +1857,6 @@
+ 
+ static atomic_t cofunc_tdx_unpin_log_budget = ATOMIC_INIT(256);
+ static atomic_t cofunc_tdx_sept_change_log_budget = ATOMIC_INIT(2048);
+-static atomic_t cofunc_tdx_sept_error_log_budget = ATOMIC_INIT(512);
+ 
+ static void cofunc_tdx_clear_page_ad_flags(struct page *page)
+ {
+@@ -1965,6 +1964,47 @@
+ 		current->pid);
+ }
+ 
++static void cofunc_tdx_log_private_split(struct kvm *kvm, const char *phase,
++					 const struct kvm_spte_change *change)
++{
++	struct kvm_tdx *kvm_tdx = to_kvm_tdx(kvm);
++
++	pr_info("CoFunc old-ABI TDX private split commit: phase=%s kvm=%p tdr=0x%llx gfn=0x%llx level=%u old_pfn=0x%llx old_present=%d old_last=%d old_private_zapped=%d new_pfn=0x%llx new_present=%d new_last=%d sept_page=%p hkid=%d assigned=%d task=%s/%d\n",
++		phase,
++		kvm,
++		(unsigned long long)kvm_tdx->tdr.pa,
++		(unsigned long long)change->gfn,
++		change->level,
++		(unsigned long long)change->old.pfn,
++		change->old.is_present,
++		change->old.is_last,
++		change->old.is_private_zapped,
++		(unsigned long long)change->new.pfn,
++		change->new.is_present,
++		change->new.is_last,
++		change->sept_page,
++		kvm_tdx->hkid,
++		is_hkid_assigned(kvm_tdx),
++		current->comm,
++		current->pid);
++}
++
++static void cofunc_tdx_log_private_demote(struct kvm *kvm, const char *phase,
++					  gfn_t gfn, enum pg_level level,
++					  hpa_t hpa, u64 err,
++					  const struct tdx_module_output *out)
++{
++	struct kvm_tdx *kvm_tdx = to_kvm_tdx(kvm);
++
++	pr_info("CoFunc old-ABI TDX private split commit: phase=%s kvm=%p tdr=0x%llx gfn=0x%llx level=%u tdx_level=%d sept_hpa=0x%llx err=0x%llx out_rcx=0x%llx out_rdx=0x%llx out_r8=0x%llx out_r9=0x%llx hkid=%d task=%s/%d\n",
++		phase, kvm, (unsigned long long)kvm_tdx->tdr.pa,
++		(unsigned long long)gfn, level,
++		pg_level_to_tdx_sept_level(level), (unsigned long long)hpa,
++		err, out ? out->rcx : 0, out ? out->rdx : 0,
++		out ? out->r8 : 0, out ? out->r9 : 0, kvm_tdx->hkid,
++		current->comm, current->pid);
++}
++
+ static void cofunc_tdx_log_sept_seamcall_failure(struct kvm *kvm,
+ 						 const char *op, gfn_t gfn,
+ 						 enum pg_level level,
+@@ -1974,9 +2014,6 @@
+ 	struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
+ 	struct kvm_tdx *kvm_tdx = to_kvm_tdx(kvm);
+ 
+-	if (!cofunc_tdx_take_log_budget(&cofunc_tdx_sept_error_log_budget))
+-		return;
+-
+ 	pr_err("CoFunc old-ABI TDX SEPT seamcall failure context: op=%s gfn=0x%llx gpa=0x%llx level=%u tdx_level=%d pfn=0x%llx err=0x%llx out_rcx=0x%llx out_rdx=0x%llx out_r8=0x%llx out_r9=0x%llx slot_private=%d hkid=%d assigned=%d blocked=%d task=%s/%d\n",
+ 	       op, (unsigned long long)gfn, (unsigned long long)gfn_to_gpa(gfn),
+ 	       level, pg_level_to_tdx_sept_level(level), (unsigned long long)pfn,
+@@ -2137,13 +2174,19 @@
+ 	struct kvm_tdx *kvm_tdx = to_kvm_tdx(kvm);
+ 	gpa_t gpa = gfn << PAGE_SHIFT;
+ 	hpa_t hpa = __pa(sept_page);
+-	struct tdx_module_output out;
++	struct tdx_module_output out = {};
+ 	u64 err;
+ 
+ 	/* See comment in tdx_sept_set_private_spte() */
++	if (level > PG_LEVEL_4K)
++		cofunc_tdx_log_private_demote(kvm, "demote-begin", gfn, level,
++					      hpa, 0, NULL);
+ 	spin_lock(&kvm_tdx->seamcall_lock);
+ 	err = tdh_mem_page_demote(kvm_tdx->tdr.pa, gpa, tdx_level, hpa, &out);
+ 	spin_unlock(&kvm_tdx->seamcall_lock);
++	if (level > PG_LEVEL_4K)
++		cofunc_tdx_log_private_demote(kvm, "demote-end", gfn, level,
++					      hpa, err, &out);
+ 	if (KVM_BUG_ON(err, kvm)) {
+ 		cofunc_tdx_log_sept_seamcall_failure(kvm, "page_demote",
+ 						     gfn, level, 0, err, &out);
+@@ -2375,6 +2418,8 @@
+ 			   change->old.is_last && !change->new.is_last) {
+ 			int i;
+ 
++			cofunc_tdx_log_private_split(kvm, "blocked-split-begin",
++						     change);
+ 			cofunc_tdx_log_sept_change(kvm,
+ 						   "private_zapped-split-block-children",
+ 						   change);
+@@ -2384,6 +2429,8 @@
+ 			for (i = 0; i < SPTE_ENT_PER_PAGE; i++)
+ 				tdx_sept_zap_private_spte(kvm, change->gfn + i, change->level - 1);
+ 			tdx_sept_tlb_remote_flush(kvm);
++			cofunc_tdx_log_private_split(kvm, "blocked-split-end",
++						     change);
+ 		} else {
+ 			/*
+ 			 * Because page is pined (refer to
+@@ -2425,10 +2472,14 @@
+ 
+ 	if (change->new.is_present) {
+ 		if (level > PG_LEVEL_4K && was_leaf && !is_leaf) {
++			cofunc_tdx_log_private_split(kvm, "live-split-begin",
++						     change);
+ 			cofunc_tdx_log_sept_change(kvm, "changed-live-split", change);
+ 			tdx_sept_zap_private_spte(kvm, gfn, level);
+ 			tdx_sept_tlb_remote_flush(kvm);
+ 			tdx_sept_split_private_spte(kvm, gfn, level, change->sept_page);
++			cofunc_tdx_log_private_split(kvm, "live-split-end",
++						     change);
+ 		} else if (is_leaf)
+ 			tdx_sept_set_private_spte(
+ 				kvm, gfn, level, change->new.pfn);
+-- 
+2.43.0
+

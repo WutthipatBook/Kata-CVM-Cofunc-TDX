@@ -1,0 +1,52 @@
+diff --git a/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c b/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c
+--- a/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c
++++ b/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c
+@@ -137,6 +137,11 @@ u8 get_cpu_apic_id(int cpu_id)
+ 	return madt_info.local_apic_ids[cpu_id];
+ }
+ 
++u8 get_cpu_count(void)
++{
++	return madt_info.processor_count;
++}
++
+ void madt_wakeup_cpu(int apic_id, u64 wakeup_vector)
+ {
+ 	mp_wakeup_mailbox->apic_id = apic_id;
+diff --git a/cvm_os/kernel/arch/x86_64/machine/smp.c b/cvm_os/kernel/arch/x86_64/machine/smp.c
+--- a/cvm_os/kernel/arch/x86_64/machine/smp.c
++++ b/cvm_os/kernel/arch/x86_64/machine/smp.c
+@@ -89,6 +89,7 @@ void init_per_cpu_info(u32 cpuid)
+ void enable_smp_cores(void)
+ {
+ 	int cpuid;
++	int cpu_num;
+ #ifndef CHCORE_PLAT_INTEL_TDX
+ 	u64 mp_code;
+ 
+@@ -99,11 +100,8 @@ void enable_smp_cores(void)
+         memmove((void *)mp_code, (void *)(&_mp_start), (u64)(&_mp_start_end) - (u64)(&_mp_start));
+ #endif /* CHCORE_PLAT_INTEL_TDX */
+ 
+-	/*
+-	 * TODO: Since we can detect the real CPU number by reading the MADT,
+-	 * we can avoid using the static PLAT_CPU_NUM.
+-	 */
+-	for (cpuid = 1; cpuid < PLAT_CPU_NUM; cpuid ++)
++	cpu_num = MIN((int)PLAT_CPU_NUM, (int)get_cpu_count());
++	for (cpuid = 1; cpuid < cpu_num; cpuid ++)
+ 	{
+ 		/* Set kernel stack */
+ 		cur_cpu_stack = cpu_stacks[cpuid] + CPU_STACK_SIZE;
+diff --git a/cvm_os/kernel/include/arch/x86_64/arch/drivers/acpi.h b/cvm_os/kernel/include/arch/x86_64/arch/drivers/acpi.h
+--- a/cvm_os/kernel/include/arch/x86_64/arch/drivers/acpi.h
++++ b/cvm_os/kernel/include/arch/x86_64/arch/drivers/acpi.h
+@@ -13,5 +13,6 @@
+ #pragma once
+ 
+ void parse_acpi_info(void *info);
++u8 get_cpu_count(void);
+ u8 get_cpu_apic_id(int cpu_id);
+-void madt_wakeup_cpu(int apic_id, u64 wakeup_vector);
+\ No newline at end of file
++void madt_wakeup_cpu(int apic_id, u64 wakeup_vector);

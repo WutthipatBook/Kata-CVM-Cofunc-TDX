@@ -1,0 +1,38 @@
+From 46b807a06b53a6966279c1df5d820b87e4a30727 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 29 Jun 2026 05:10:00 +0000
+Subject: [PATCH] KVM: Diagnostic skip accessed mark on PFN release
+
+Bad-page reports during the old-ABI TDX runs consistently trip
+PAGE_FLAGS_CHECK_AT_PREP with PG_referenced left on a free page, and the stack
+passes through KVM's hva_to_pfn()/kvm_faultin_pfn() path.
+
+As a narrow diagnostic, stop marking pages accessed from KVM's clean PFN
+release helper. This should not change TDX or CoFunc semantics; it only avoids
+touching the page's reclaim/accessed state while we test whether KVM's release
+path is leaving PG_referenced behind on pages that later return to the buddy
+allocator.
+---
+ virt/kvm/kvm_main.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -3097,8 +3097,12 @@ static void kvm_set_page_dirty(struct page *page)
+ 
+ static void kvm_set_page_accessed(struct page *page)
+ {
+-	if (kvm_is_ad_tracked_page(page))
+-		mark_page_accessed(page);
++	/*
++	 * Diagnostic for old-ABI TDX bad-page reports: avoid leaving
++	 * PG_referenced on pages released through KVM's PFN path.
++	 */
++	if (kvm_is_ad_tracked_page(page))
++		return;
+ }
+ 
+ void kvm_release_page_clean(struct page *page)
+-- 
+2.43.0
+

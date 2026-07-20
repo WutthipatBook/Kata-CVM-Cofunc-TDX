@@ -1,0 +1,51 @@
+From 8b28baf0fd3e4da7eab0a4a50a3dcb6848f20689 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 29 Jun 2026 08:10:00 +0000
+Subject: [PATCH] KVM: Diagnostic skip dirty/accessed page flag updates
+
+Bad-page reports during old-ABI TDX runs still show free pages reaching
+PAGE_FLAGS_CHECK_AT_PREP with PG_referenced and sometimes PG_dirty set.
+Skipping only KVM's accessed marking did not remove the reports, but the
+latest THP-never run still routes QEMU faults through KVM's hva_to_pfn() /
+kvm_faultin_pfn() path.
+
+As a stronger diagnostic, stop setting both PG_dirty and PG_referenced from
+KVM's page release helpers. If the same flags still appear on free pages, KVM's
+A/D flag updates are likely a symptom or only one contributor, not the primary
+source of contamination.
+---
+ virt/kvm/kvm_main.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -3092,14 +3092,22 @@ static bool kvm_is_ad_tracked_page(struct page *page)
+ 
+ static void kvm_set_page_dirty(struct page *page)
+ {
+-	if (kvm_is_ad_tracked_page(page))
+-		SetPageDirty(page);
++	/*
++	 * CoFunc old-ABI A/D diagnostic: avoid setting PG_dirty on pages
++	 * returned through KVM's PFN path.
++	 */
++	if (kvm_is_ad_tracked_page(page))
++		return;
+ }
+ 
+ static void kvm_set_page_accessed(struct page *page)
+ {
+-	if (kvm_is_ad_tracked_page(page))
+-		mark_page_accessed(page);
++	/*
++	 * CoFunc old-ABI A/D diagnostic: avoid setting PG_referenced on pages
++	 * returned through KVM's PFN path.
++	 */
++	if (kvm_is_ad_tracked_page(page))
++		return;
+ }
+ 
+ void kvm_release_page_clean(struct page *page)
+-- 
+2.43.0
+

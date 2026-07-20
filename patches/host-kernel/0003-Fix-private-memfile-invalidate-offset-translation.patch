@@ -1,0 +1,56 @@
+From 9d6e59a9bc3f3bca4d4b30afcfa908cd91b98d27 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 29 Jun 2026 04:05:00 +0000
+Subject: [PATCH] KVM: Fix private memfile invalidate offset translation
+
+The memfile notifier receives file page offsets, not guest frame numbers.
+Clip the invalidate range against the private-file offset before translating
+it into the memslot's GFN range.
+
+The old check mixed slot->base_gfn into the file-offset comparison, which can
+miss invalidations for private memslots whose guest GPA base is not zero.
+Missed invalidations can leave stale private SPTEs around page-cache removal.
+---
+ virt/kvm/kvm_main.c | 21 ++++++++++++---------
+ 1 file changed, 12 insertions(+), 9 deletions(-)
+
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -1002,22 +1002,25 @@
+ 	struct kvm_memory_slot *slot = container_of(notifier,
+ 						    struct kvm_memory_slot,
+ 						    notifier);
+-	unsigned long base_pgoff = slot->private_offset >> PAGE_SHIFT;
+-	gfn_t start_gfn = slot->base_gfn;
+-	gfn_t end_gfn = slot->base_gfn + slot->npages;
++	pgoff_t slot_start = slot->private_offset >> PAGE_SHIFT;
++	pgoff_t slot_end = slot_start + slot->npages;
++	gfn_t start_gfn;
++	gfn_t end_gfn;
+ 
+ 
+-	if (end < slot->base_gfn + base_pgoff ||
+-	    start > slot->base_gfn + base_pgoff + slot->npages)
++	if (end <= slot_start || start >= slot_end)
+ 		return;
+ 
+-	if (start > base_pgoff)
+-		start_gfn = slot->base_gfn + start - base_pgoff;
++	/* start/end are file offsets; translate to GFNs after clipping. */
++	if (start < slot_start)
++		start = slot_start;
++	if (end > slot_end)
++		end = slot_end;
+ 
+-	if (end < base_pgoff + slot->npages)
+-		end_gfn = slot->base_gfn + end - base_pgoff;
++	start_gfn = slot->base_gfn + start - slot_start;
++	end_gfn = slot->base_gfn + end - slot_start;
+ 
+-	if (start_gfn >= end_gfn)
++	if (WARN_ON_ONCE(start_gfn >= end_gfn))
+ 		return;
+ 
+ 	kvm_zap_gfn_range(slot->kvm, start_gfn, end_gfn);
+-- 
+2.43.0

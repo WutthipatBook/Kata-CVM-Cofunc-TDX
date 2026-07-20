@@ -1,0 +1,80 @@
+From 51f4f4be8fb52df5e26424b98cbe95ec1f5de8d7 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Thu, 2 Jul 2026 02:20:00 +0000
+Subject: [PATCH] KVM: Diagnostic log all face-GFN TDP mappings
+
+0009 narrowed the private TDP/MMU diagnostic to the face runtime grant GPA
+range, but produced no private-path lines. The same run's bad-page stacks show
+KVM resolving faults through hva_to_pfn()/get_user_pages(), which points at the
+ordinary userspace-HVA path.
+
+Apply this patch on top of 0009. It keeps the face-GFN range filter, but logs
+all TDP mappings in that range instead of only private mappings. Include the
+is_private value, slot flags, and HVA so the next face run can identify the
+exact mapping mode and final SPTE level for the rejected 2MB accept GFNs.
+
+diff -uNr base/arch/x86/kvm/mmu/tdp_mmu.c mod/arch/x86/kvm/mmu/tdp_mmu.c
+--- base/arch/x86/kvm/mmu/tdp_mmu.c	2026-07-02 02:20:00.000000000 +0000
++++ mod/arch/x86/kvm/mmu/tdp_mmu.c	2026-07-02 02:20:00.000000000 +0000
+@@ -15,8 +15,8 @@
+ module_param_named(tdp_mmu, tdp_mmu_enabled, bool, 0644);
+ 
+ /*
+- * CoFunc old-ABI face-GFN private TDP level diagnostic: narrow 0008's
+- * high-GFN probe to the runtime grant band seen in face runs.
++ * CoFunc old-ABI face-GFN all TDP level diagnostic: log both private and
++ * non-private mappings in the runtime grant band seen in face runs.
+  */
+ #define COFUNC_TDX_TDP_DIAG_MIN_GFN	0x500000ULL
+ #define COFUNC_TDX_TDP_DIAG_MAX_GFN	0x800000ULL
+@@ -1475,18 +1475,20 @@
+ 	int ret;
+ 
+ 	kvm_mmu_hugepage_adjust(vcpu, fault);
+-	if (is_private &&
+-	    cofunc_tdx_tdp_diag_should_log(fault->gfn,
+-					   &cofunc_tdx_tdp_adjust_log_budget))
+-		pr_info("CoFunc old-ABI face-GFN private TDP level diagnostic: tdp_adjust gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u host_pages=%lu disallowed=%d gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++	if (cofunc_tdx_tdp_diag_should_log(fault->gfn,
++					   &cofunc_tdx_tdp_adjust_log_budget))
++		pr_info("CoFunc old-ABI face-GFN all TDP level diagnostic: tdp_adjust private=%d gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u host_pages=%lu disallowed=%d slot_flags=0x%lx hva=0x%lx gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++			is_private,
+ 			(unsigned long long)fault->gfn,
+ 			(unsigned long long)fault->pfn,
+ 			fault->max_level, fault->req_level, fault->goal_level,
+ 			fault->host_level,
+ 			cofunc_tdx_tdp_pages_for_level(fault->host_level),
+ 			fault->huge_page_disallowed,
++			fault->slot ? (unsigned long)fault->slot->flags : 0,
++			(unsigned long)fault->hva,
+ 			cofunc_tdx_tdp_gfn_2m_aligned(fault->gfn),
+ 			cofunc_tdx_tdp_pfn_2m_aligned(fault->pfn));
+ 
+ 	trace_kvm_mmu_spte_requested(fault);
+ 
+@@ -1576,19 +1578,21 @@
+ 		return RET_PF_RETRY;
+ 	}
+ 
+-	if (is_private &&
+-	    cofunc_tdx_tdp_diag_should_log(fault->gfn,
+-					   &cofunc_tdx_tdp_target_log_budget))
+-		pr_info("CoFunc old-ABI face-GFN private TDP level diagnostic: tdp_target fault_gfn=0x%llx iter_gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u iter_level=%d iter_pages=%lu old_present=%d old_large=%d old_private_zapped=%d fault_gfn_2m_aligned=%d iter_gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++	if (cofunc_tdx_tdp_diag_should_log(fault->gfn,
++					   &cofunc_tdx_tdp_target_log_budget))
++		pr_info("CoFunc old-ABI face-GFN all TDP level diagnostic: tdp_target private=%d fault_gfn=0x%llx iter_gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u iter_level=%d iter_pages=%lu old_present=%d old_large=%d old_private_zapped=%d slot_flags=0x%lx hva=0x%lx fault_gfn_2m_aligned=%d iter_gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++			is_private,
+ 			(unsigned long long)fault->gfn,
+ 			(unsigned long long)iter.gfn,
+ 			(unsigned long long)fault->pfn,
+ 			fault->max_level, fault->req_level, fault->goal_level,
+ 			fault->host_level, iter.level,
+ 			cofunc_tdx_tdp_pages_for_level(iter.level),
+ 			is_shadow_present_pte(iter.old_spte),
+ 			is_large_pte(iter.old_spte),
+ 			is_private_zapped_spte(iter.old_spte),
++			fault->slot ? (unsigned long)fault->slot->flags : 0,
++			(unsigned long)fault->hva,
+ 			cofunc_tdx_tdp_gfn_2m_aligned(fault->gfn),
+ 			cofunc_tdx_tdp_gfn_2m_aligned(iter.gfn),
+ 			cofunc_tdx_tdp_pfn_2m_aligned(fault->pfn));

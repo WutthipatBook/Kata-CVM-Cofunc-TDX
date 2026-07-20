@@ -1,0 +1,34 @@
+Absolute E2E mode comparison
+============================
+
+Run: June 22 measured TDX CoFunc
+Generated: 2026-07-02T05:37:05+00:00
+Measured cofunc source: /mnt/new_disk/cofunc_tdx_artifact/results/tdx_fig11_20260622_053741/tdx_sc_fork_summary.txt
+Expected K/N/C source: /mnt/new_disk/cofunc_tdx_artifact/results/tdx_fig11_20260622_053741/fig11_expected.txt
+
+Mode mapping:
+- cofunc = measured TDX_CoFunc_fork(s) from the selected summary
+- cofunc_huge = artifact/paper CoFunc target C / Artifact_C(s)
+- native = artifact/paper Native target N
+- cold = artifact/paper Kata-CVM/cold target K
+
+Mean measured cofunc / cofunc_huge ratio: 3.072x
+Mean measured cofunc - cofunc_huge gap: 4.303 s
+
+Largest absolute cofunc - cofunc_huge gaps:
+- fn_py_video_processing: +23.748 s (52.678 vs 28.930)
+- fn_py_dna_visualisation: +9.801 s (19.196 vs 9.395)
+- fn_py_image_processing: +2.927 s (7.464 vs 4.537)
+- fn_py_compression: +0.689 s (1.374 vs 0.685)
+- fn_py_face_detection: +0.564 s (1.181 vs 0.617)
+
+Measured cofunc vs cold/Kata-CVM:
+- fn_py_video_processing: 22.445 s slower
+- fn_py_dna_visualisation: 9.015 s slower
+- fn_py_image_processing: 2.052 s slower
+- fn_py_compression: 0.164 s slower
+- fn_js_uploader: 0.507 s faster
+- fn_py_sentiment: 0.540 s faster
+- fn_py_face_detection: 0.718 s faster
+- fn_js_thumbnailer: 0.735 s faster
+- chain_js_alexa: 2.278 s faster

@@ -1,0 +1,16 @@
+--- a/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
++++ b/cvm_os/kernel/arch/x86_64/boot/intel_tdx/init/header.S
+@@ -61,6 +61,13 @@ efi_amd64_entry_address_tag_start:
+         .long efi_amd64_entry_address_tag_end - efi_amd64_entry_address_tag_start
+         .long PADDR(_start)
+ efi_amd64_entry_address_tag_end:
++console_flags_tag_start:
++.align 8
++        .short MULTIBOOT_HEADER_TAG_CONSOLE_FLAGS
++        .short MULTIBOOT_HEADER_TAG_OPTIONAL
++        .long console_flags_tag_end - console_flags_tag_start
++        .long MULTIBOOT_CONSOLE_FLAGS_EGA_TEXT_SUPPORTED
++console_flags_tag_end:
+ .align 8
+         .short MULTIBOOT_TAG_TYPE_END
+         .short 0

@@ -1,0 +1,216 @@
+From 3db3bc9aa384d26a5cc26da7b7df0cfdf5233d8a Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Tue, 7 Jul 2026 04:30:00 +0000
+Subject: [PATCH] KVM: Diagnostic suppress private TDP SPTE A/D after unpin
+
+The guarded old-ABI TDX smoke gate still poisons the host: the workload can
+complete cleanly, but a later allocator churn finds free pages with
+PG_referenced and PG_dirty set.  Clearing flags in the early fault-release path
+and in tdx_unpin() was not sufficient.
+
+One remaining ordering is specific to TDP private SPTE teardown.  The TDX
+private-SPTE callback can drop the SEPT pin and put the page, but the generic
+TDP bookkeeping then still runs accessed/dirty accounting on the old PFN.  For
+old-ABI private mappings backed by normal memslots, that can mark a page after
+TDX has released the final page reference.
+
+As a diagnostic, skip generic A/D page-flag tracking for private TDP SPTE
+changes.  Also log and harden the two existing cleanup points so the next run
+can correlate cleanup ranges with any later bad PFNs.
+---
+ arch/x86/kvm/mmu/mmu.c     | 38 ++++++++++++++++++++++++++++++++++----
+ arch/x86/kvm/mmu/tdp_mmu.c | 35 +++++++++++++++++++++++++++++++++--
+ arch/x86/kvm/vmx/tdx.c     | 34 +++++++++++++++++++++++++++++++---
+ 3 files changed, 98 insertions(+), 9 deletions(-)
+
+--- a/arch/x86/kvm/mmu/mmu.c
++++ b/arch/x86/kvm/mmu/mmu.c
+@@ -4835,6 +4835,20 @@ static bool is_page_fault_stale(struct kvm_vcpu *vcpu,
+ 	       mmu_updating_retry_gfn(vcpu->kvm, mmu_seq, fault->gfn);
+ }
+ 
++static atomic_t cofunc_tdx_oldabi_release_log_budget = ATOMIC_INIT(256);
++
++static void cofunc_tdx_oldabi_clear_page_ad_flags(struct page *page)
++{
++	struct page *head = compound_head(page);
++
++	ClearPageReferenced(page);
++	ClearPageDirty(page);
++	if (head != page) {
++		ClearPageReferenced(head);
++		ClearPageDirty(head);
++	}
++}
++
+ static bool cofunc_tdx_oldabi_release_private_fault_pfn_clean(struct kvm_page_fault *fault)
+ {
+ 	struct page *release_page;
+@@ -4864,12 +4878,28 @@ static bool cofunc_tdx_oldabi_release_private_fault_pfn_clean(struct kvm_page_fa
+ 		level = PG_LEVEL_4K;
+ 
+ 	nr_pages = KVM_PAGES_PER_HPAGE(level);
+-	for (i = 0; i < nr_pages; i++) {
+-		page = pfn_to_page(fault->pfn + i);
+-		ClearPageReferenced(page);
+-		ClearPageDirty(page);
++	if (atomic_dec_if_positive(&cofunc_tdx_oldabi_release_log_budget) >= 0) {
++		pr_info("CoFunc old-ABI private fault release range: gfn=0x%llx pfn=0x%llx level=%u pages=%d max=%u req=%u goal=%u host=%u slot_flags=0x%lx hva=0x%lx writable=%d write=%d exec=%d\n",
++			(unsigned long long)fault->gfn,
++			(unsigned long long)fault->pfn,
++			level,
++			nr_pages,
++			fault->max_level,
++			fault->req_level,
++			fault->goal_level,
++			fault->host_level,
++			fault->slot ? (unsigned long)fault->slot->flags : 0,
++			(unsigned long)fault->hva,
++			fault->map_writable,
++			fault->write,
++			fault->exec);
+ 	}
+ 
++	for (i = 0; i < nr_pages; i++) {
++		page = pfn_to_page(fault->pfn + i);
++		cofunc_tdx_oldabi_clear_page_ad_flags(page);
++	}
++
+ 	put_page(release_page);
+ 	return true;
+ }
+--- a/arch/x86/kvm/mmu/tdp_mmu.c
++++ b/arch/x86/kvm/mmu/tdp_mmu.c
+@@ -413,6 +413,32 @@ static void handle_changed_spte_dirty_log(struct kvm *kvm, int as_id, gfn_t gfn
+ 	}
+ }
+ 
++static atomic_t cofunc_tdx_private_spte_ad_log_budget = ATOMIC_INIT(256);
++
++static bool cofunc_tdx_private_spte_skip_ad_track(struct kvm *kvm,
++						  union kvm_mmu_page_role role,
++						  gfn_t gfn, u64 old_spte,
++						  u64 new_spte, int level)
++{
++	if (!kvm_gfn_shared_mask(kvm) || !kvm_mmu_page_role_is_private(role))
++		return false;
++
++	if (!is_shadow_present_pte(old_spte) || !is_last_spte(old_spte, level))
++		return true;
++
++	if (atomic_dec_if_positive(&cofunc_tdx_private_spte_ad_log_budget) >= 0)
++		pr_info("CoFunc old-ABI private TDP SPTE A/D suppress: gfn=0x%llx pfn=0x%llx level=%d old_accessed=%d old_dirty=%d new_present=%d new_accessed=%d new_dirty=%d\n",
++			(unsigned long long)gfn,
++			(unsigned long long)spte_to_pfn(old_spte),
++			level,
++			is_accessed_spte(old_spte),
++			is_dirty_spte(old_spte),
++			is_shadow_present_pte(new_spte),
++			is_accessed_spte(new_spte),
++			is_dirty_spte(new_spte));
++	return true;
++}
++
+ /**
+  * tdp_mmu_unlink_sp() - Remove a shadow page from the list of used pages
+  * @kvm: kvm instance
+@@ -741,9 +766,12 @@ static void handle_changed_spte(struct kvm *kvm, int as_id, gfn_t gfn,
+ 				union kvm_mmu_page_role role, bool shared)
+ {
+ 	__handle_changed_spte(kvm, as_id, gfn, old_spte, new_spte, role, shared);
+-	handle_changed_spte_acc_track(old_spte, new_spte, role.level);
+-	handle_changed_spte_dirty_log(kvm, as_id, gfn, old_spte,
+-				      new_spte, role.level);
++	if (!cofunc_tdx_private_spte_skip_ad_track(kvm, role, gfn, old_spte,
++						   new_spte, role.level)) {
++		handle_changed_spte_acc_track(old_spte, new_spte, role.level);
++		handle_changed_spte_dirty_log(kvm, as_id, gfn, old_spte,
++					      new_spte, role.level);
++	}
+ }
+ 
+ /*
+@@ -779,6 +807,7 @@ static inline int tdp_mmu_set_spte_atomic(struct kvm *kvm,
+ 	 * - Trigger callbacks for protected page tables. __handle_changed_spte()
+ 	 * - Unfreeze the SPTE.  Set the entry to new_spte.
+ 	 */
++	union kvm_mmu_page_role role;
+ 	bool freeze_spte = is_private_sptep(iter->sptep) && !is_removed_spte(new_spte);
+ 	u64 tmp_spte = freeze_spte ? REMOVED_SPTE : new_spte;
+ 	u64 *sptep = rcu_dereference(iter->sptep);
+@@ -803,10 +832,12 @@ static inline int tdp_mmu_set_spte_atomic(struct kvm *kvm,
+ 	if (!try_cmpxchg64(sptep, &iter->old_spte, tmp_spte))
+ 		return -EBUSY;
+ 
++	role = sptep_to_sp(sptep)->role;
+ 	__handle_changed_spte(
+ 		kvm, iter->as_id, iter->gfn,
+-		iter->old_spte, new_spte, sptep_to_sp(sptep)->role, true);
+-	handle_changed_spte_acc_track(iter->old_spte, new_spte, iter->level);
++		iter->old_spte, new_spte, role, true);
++	if (!cofunc_tdx_private_spte_skip_ad_track(kvm, role, iter->gfn, iter->old_spte, new_spte, iter->level))
++		handle_changed_spte_acc_track(iter->old_spte, new_spte, iter->level);
+ 
+ 	if (freeze_spte)
+ 		__kvm_tdp_mmu_write_spte(sptep, new_spte);
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -1852,6 +1852,20 @@ void tdx_load_mmu_pgd(struct kvm_vcpu *vcpu, hpa_t root_hpa, int pgd_level)
+ 	td_vmcs_write64(to_tdx(vcpu), SHARED_EPT_POINTER, root_hpa & PAGE_MASK);
+ }
+ 
++static atomic_t cofunc_tdx_unpin_log_budget = ATOMIC_INIT(256);
++
++static void cofunc_tdx_clear_page_ad_flags(struct page *page)
++{
++	struct page *head = compound_head(page);
++
++	ClearPageReferenced(page);
++	ClearPageDirty(page);
++	if (head != page) {
++		ClearPageReferenced(head);
++		ClearPageDirty(head);
++	}
++}
++
+ static void cofunc_tdx_clear_unpin_page_flags(struct page *page)
+ {
+ 	/*
+@@ -1863,8 +1877,7 @@ static void cofunc_tdx_clear_unpin_page_flags(struct page *page)
+ 	 * clean PFN release may leave PG_referenced set while the SEPT pin keeps
+ 	 * the page alive; tdx_unpin() can then be the final put_page().
+ 	 */
+-	ClearPageReferenced(page);
+-	ClearPageDirty(page);
++	cofunc_tdx_clear_page_ad_flags(page);
+ }
+ 
+ static void tdx_measure_page(struct kvm_tdx *kvm_tdx, hpa_t gpa, int size)
+@@ -1888,11 +1901,24 @@ static void tdx_unpin(struct kvm *kvm, gfn_t gfn, kvm_pfn_t pfn,
+ {
+ 	struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
+ 	int i;
++	int nr_pages = KVM_PAGES_PER_HPAGE(level);
++
++	if (atomic_dec_if_positive(&cofunc_tdx_unpin_log_budget) >= 0)
++		pr_info("CoFunc old-ABI TDX unpin range: gfn=0x%llx pfn=0x%llx level=%u pages=%d slot_private=%d hkid=%d\n",
++			(unsigned long long)gfn,
++			(unsigned long long)pfn,
++			level,
++			nr_pages,
++			slot ? kvm_slot_can_be_private(slot) : -1,
++			to_kvm_tdx(kvm)->hkid);
+ 
+-	for (i = 0; i < KVM_PAGES_PER_HPAGE(level); i++) {
++	for (i = 0; i < nr_pages; i++) {
+ 		struct page *page = pfn_to_page(pfn + i);
++		struct page *head = compound_head(page);
+ 
+ 		cofunc_tdx_clear_unpin_page_flags(page);
++		if (head != page)
++			cofunc_tdx_clear_unpin_page_flags(head);
+ 		put_page(page);
+ 		WARN_ON(!page_count(page) && to_kvm_tdx(kvm)->hkid > 0);
+ 	}
+-- 
+2.43.0

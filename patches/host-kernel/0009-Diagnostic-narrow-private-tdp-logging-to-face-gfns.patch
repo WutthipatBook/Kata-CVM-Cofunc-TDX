@@ -1,0 +1,93 @@
+From 2f11b33c20f9f69b43d8abf3d3d51d89d1eb8c51 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Wed, 1 Jul 2026 07:15:00 +0000
+Subject: [PATCH] KVM: Diagnostic narrow private TDP logging to face GFNs
+
+0008 proved that high-GFN private TDP faults can be installed as 4KB leaves,
+but its budget was consumed around gfn 0x100000 before the face workload's
+rejected 2MB accept GPAs around 0x583000/0x59c000.
+
+Apply this patch on top of 0008. It narrows the diagnostic range to the runtime
+grant band, gfn [0x500000, 0x800000), and raises the log budget enough for one
+face run. The range covers the observed 0x583..., 0x683..., and 0x700...
+GPA layouts while skipping the early 0x100... mappings.
+
+diff -uNr base/arch/x86/kvm/mmu/mmu.c mod/arch/x86/kvm/mmu/mmu.c
+--- base/arch/x86/kvm/mmu/mmu.c	2026-07-01 07:10:00.000000000 +0000
++++ mod/arch/x86/kvm/mmu/mmu.c	2026-07-01 07:10:00.000000000 +0000
+@@ -4558,15 +4558,17 @@
+ }
+ 
+ /*
+- * CoFunc old-ABI private MMU level diagnostic: only log high GFNs, matching
+- * split-container runtime grant GPAs such as 0x683000000.
++ * CoFunc old-ABI face-GFN private MMU level diagnostic: narrow 0008's
++ * high-GFN probe to the runtime grant band seen in face runs.
+  */
+-#define COFUNC_TDX_DIAG_MIN_GFN	0x100000ULL
+-static atomic_t cofunc_tdx_private_pfn_log_budget = ATOMIC_INIT(256);
++#define COFUNC_TDX_DIAG_MIN_GFN	0x500000ULL
++#define COFUNC_TDX_DIAG_MAX_GFN	0x800000ULL
++static atomic_t cofunc_tdx_private_pfn_log_budget = ATOMIC_INIT(1024);
+ 
+ static bool cofunc_tdx_mmu_diag_should_log(gfn_t gfn, atomic_t *budget)
+ {
+ 	return gfn >= COFUNC_TDX_DIAG_MIN_GFN &&
++	       gfn < COFUNC_TDX_DIAG_MAX_GFN &&
+ 	       atomic_dec_if_positive(budget) >= 0;
+ }
+ 
+@@ -4629,7 +4631,7 @@
+ 		fault->host_level = level;
+ 		if (cofunc_tdx_mmu_diag_should_log(fault->gfn,
+ 						   &cofunc_tdx_private_pfn_log_budget))
+-			pr_info("CoFunc old-ABI private MMU level diagnostic: private_pfn gfn=0x%llx pfn=0x%llx order=%d host_level=%u max_level=%u pages=%lu gfn_2m_aligned=%d pfn_2m_aligned=%d private_exist=%d\n",
++			pr_info("CoFunc old-ABI face-GFN private MMU level diagnostic: private_pfn gfn=0x%llx pfn=0x%llx order=%d host_level=%u max_level=%u pages=%lu gfn_2m_aligned=%d pfn_2m_aligned=%d private_exist=%d\n",
+ 				(unsigned long long)fault->gfn,
+ 				(unsigned long long)fault->pfn, order,
+ 				fault->host_level, fault->max_level,
+diff -uNr base/arch/x86/kvm/mmu/tdp_mmu.c mod/arch/x86/kvm/mmu/tdp_mmu.c
+--- base/arch/x86/kvm/mmu/tdp_mmu.c	2026-07-01 07:10:00.000000000 +0000
++++ mod/arch/x86/kvm/mmu/tdp_mmu.c	2026-07-01 07:10:00.000000000 +0000
+@@ -15,16 +15,18 @@
+ module_param_named(tdp_mmu, tdp_mmu_enabled, bool, 0644);
+ 
+ /*
+- * CoFunc old-ABI private TDP level diagnostic: log high GFNs only, so boot
+- * mappings do not consume the budget before runtime split-container grants.
++ * CoFunc old-ABI face-GFN private TDP level diagnostic: narrow 0008's
++ * high-GFN probe to the runtime grant band seen in face runs.
+  */
+-#define COFUNC_TDX_TDP_DIAG_MIN_GFN	0x100000ULL
+-static atomic_t cofunc_tdx_tdp_adjust_log_budget = ATOMIC_INIT(256);
+-static atomic_t cofunc_tdx_tdp_target_log_budget = ATOMIC_INIT(256);
++#define COFUNC_TDX_TDP_DIAG_MIN_GFN	0x500000ULL
++#define COFUNC_TDX_TDP_DIAG_MAX_GFN	0x800000ULL
++static atomic_t cofunc_tdx_tdp_adjust_log_budget = ATOMIC_INIT(1024);
++static atomic_t cofunc_tdx_tdp_target_log_budget = ATOMIC_INIT(1024);
+ 
+ static bool cofunc_tdx_tdp_diag_should_log(gfn_t gfn, atomic_t *budget)
+ {
+ 	return gfn >= COFUNC_TDX_TDP_DIAG_MIN_GFN &&
++	       gfn < COFUNC_TDX_TDP_DIAG_MAX_GFN &&
+ 	       atomic_dec_if_positive(budget) >= 0;
+ }
+ 
+@@ -1476,7 +1478,7 @@
+ 	if (is_private &&
+ 	    cofunc_tdx_tdp_diag_should_log(fault->gfn,
+ 					   &cofunc_tdx_tdp_adjust_log_budget))
+-		pr_info("CoFunc old-ABI private TDP level diagnostic: tdp_adjust gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u host_pages=%lu disallowed=%d gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++		pr_info("CoFunc old-ABI face-GFN private TDP level diagnostic: tdp_adjust gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u host_pages=%lu disallowed=%d gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
+ 			(unsigned long long)fault->gfn,
+ 			(unsigned long long)fault->pfn,
+ 			fault->max_level, fault->req_level, fault->goal_level,
+@@ -1577,7 +1579,7 @@
+ 	if (is_private &&
+ 	    cofunc_tdx_tdp_diag_should_log(fault->gfn,
+ 					   &cofunc_tdx_tdp_target_log_budget))
+-		pr_info("CoFunc old-ABI private TDP level diagnostic: tdp_target fault_gfn=0x%llx iter_gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u iter_level=%d iter_pages=%lu old_present=%d old_large=%d old_private_zapped=%d fault_gfn_2m_aligned=%d iter_gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
++		pr_info("CoFunc old-ABI face-GFN private TDP level diagnostic: tdp_target fault_gfn=0x%llx iter_gfn=0x%llx pfn=0x%llx max=%u req=%u goal=%u host=%u iter_level=%d iter_pages=%lu old_present=%d old_large=%d old_private_zapped=%d fault_gfn_2m_aligned=%d iter_gfn_2m_aligned=%d pfn_2m_aligned=%d\n",
+ 			(unsigned long long)fault->gfn,
+ 			(unsigned long long)iter.gfn,
+ 			(unsigned long long)fault->pfn,

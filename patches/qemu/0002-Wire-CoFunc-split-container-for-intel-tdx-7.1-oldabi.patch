@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Tue, 23 Jun 2026 00:00:00 +0000
+Subject: [PATCH] Wire CoFunc split-container for Intel TDX 7.1 old ABI
+
+---
+ accel/kvm/kvm-all.c       |  7 +++++++
+ include/split-container.h | 11 +++++++++++
+ target/i386/kvm/tdx.c     | 21 +++++++++++++++++++++
+ 3 files changed, 39 insertions(+)
+ create mode 100644 include/split-container.h
+
+diff --git a/accel/kvm/kvm-all.c b/accel/kvm/kvm-all.c
+index da9f1f8a62..984e6e6eb 100644
+--- a/accel/kvm/kvm-all.c
++++ b/accel/kvm/kvm-all.c
+@@ -48,6 +48,7 @@
+ 
+ #include "hw/boards.h"
+ #include "monitor/stats.h"
++#include "split-container.h"
+ 
+ /* This check must be after config-host.h is included */
+ #ifdef CONFIG_EVENTFD
+@@ -2387,6 +2388,7 @@ static int kvm_init(MachineState *ms)
+     const KVMCapabilityInfo *missing_cap;
+     int ret;
+     int type = 0;
++    const char *env_slot_id;
+     uint64_t dirty_log_manual_caps;
+ 
+     qemu_mutex_init(&kml_slots_lock);
+@@ -2452,6 +2454,11 @@ static int kvm_init(MachineState *ms)
+         type = mc->kvm_type(ms, NULL);
+     }
+ 
++    env_slot_id = getenv("SLOT_ID");
++    if (env_slot_id && *env_slot_id) {
++        type |= KVM_VM_TYPE_SC_SLOT(strtoul(env_slot_id, NULL, 0));
++    }
++
+     do {
+         ret = kvm_ioctl(s, KVM_CREATE_VM, type);
+     } while (ret == -EINTR);
+diff --git a/include/split-container.h b/include/split-container.h
+new file mode 100644
+index 000000000..662d50c40
+--- /dev/null
++++ b/include/split-container.h
+@@ -0,0 +1,11 @@
++#pragma once
++
++#define KVM_VM_TYPE_SC_MASK             0xff000000U
++#define KVM_VM_TYPE_SC_SLOT(slot)       ((((slot) + 1) & 0xff) << 24)
++
++#define KVM_HC_SC_VCPU_IDLE             100
++#define KVM_HC_SC_REQUEST               101
++#define KVM_HC_TDX_SC_VCPU_IDLE         0x10010
++#define KVM_HC_TDX_SC_REQUEST           0x10011
++
++#define SC_REQ_DEBUG_PUTC               1
+diff --git a/target/i386/kvm/tdx.c b/target/i386/kvm/tdx.c
+index 249fa36bb..4e691c77f 100644
+--- a/target/i386/kvm/tdx.c
++++ b/target/i386/kvm/tdx.c
+@@ -16,6 +16,7 @@
+ #include "qapi/error.h"
+ #include "qom/object_interfaces.h"
+ #include "standard-headers/asm-x86/kvm_para.h"
++#include "qemu/thread.h"
+ #include "sysemu/kvm.h"
+ #include "sysemu/sysemu.h"
+ 
+@@ -28,6 +29,7 @@
+ #include "hw/i386/tdvf-hob.h"
+ #include "kvm_i386.h"
+ #include "tdx.h"
++#include "split-container.h"
+ #include "../cpu-internal.h"
+ 
+ #include "trace.h"
+@@ -1378,6 +1380,26 @@ static void tdx_handle_vmcall(X86CPU *cpu, struct kvm_tdx_vmcall *vmcall)
+     case TDG_VP_VMCALL_SETUP_EVENT_NOTIFY_INTERRUPT:
+         tdx_handle_setup_event_notify_interrupt(vmcall);
+         break;
++    case KVM_HC_TDX_SC_VCPU_IDLE:
++        vmcall->status_code = TDG_VP_VMCALL_SUCCESS;
++        qemu_thread_exit(NULL);
++        break;
++    case KVM_HC_TDX_SC_REQUEST:
++        if (vmcall->in_r12 != SC_REQ_DEBUG_PUTC) {
++            warn_report("unknown split-container request 0x%llx",
++                        vmcall->in_r12);
++            break;
++        }
++
++        /*
++         * The paper artifact routes the ChCore debug console through this
++         * request. Other split-container requests are handled by the shadow
++         * container runtime rather than by QEMU.
++         */
++        putchar(vmcall->in_r13);
++        fflush(stdout);
++        vmcall->status_code = TDG_VP_VMCALL_SUCCESS;
++        break;
+     default:
+         warn_report("unknown tdg.vp.vmcall type 0x%llx subfunction 0x%llx",
+                     vmcall->type, vmcall->subfunction);
+-- 
+2.43.0

@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Sat, 27 Jun 2026 14:20:00 +0000
+Subject: [PATCH] Route CoFunc TDX VMCALL leaves to userspace for 5.19
+
+The 5.19 CoFunc host patch adds split-container VM/vCPU plumbing and marks
+CoFunc idle VCPUs when a userspace-routed TDX VMCALL is already in progress,
+but it does not route the CoFunc TDX leaves themselves to userspace.
+
+Without these cases, a standard TDG.VP.VMCALL with R10=0 and R11=0x10011
+falls into handle_tdvmcall()'s default case and returns
+TDG_VP_VMCALL_INVALID_OPERAND before QEMU can run its CoFunc handler.
+---
+ arch/x86/kvm/vmx/tdx.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/x86/kvm/vmx/tdx.c b/arch/x86/kvm/vmx/tdx.c
+index 12dc3b963..5d1a5e51c 100644
+--- a/arch/x86/kvm/vmx/tdx.c
++++ b/arch/x86/kvm/vmx/tdx.c
+@@ -1829,10 +1829,17 @@ static int handle_tdvmcall(struct kvm_vcpu *vcpu)
+ 	case TDG_VP_VMCALL_SETUP_EVENT_NOTIFY_INTERRUPT:
+ 		r = tdx_setup_event_notify_interrupt(vcpu);
+ 		break;
+ 	case TDG_VP_VMCALL_GET_QUOTE:
+ 		r = tdx_get_quote(vcpu);
+ 		break;
++	case KVM_HC_TDX_SC_VCPU_IDLE:
++	case KVM_HC_TDX_SC_REQUEST:
++		/*
++		 * CoFunc TDX split-container requests are handled by QEMU.
++		 */
++		r = tdx_vp_vmcall_to_user(vcpu);
++		break;
+ 	default:
+ 		tdvmcall_set_return_code(vcpu, TDG_VP_VMCALL_INVALID_OPERAND);
+ 		r = 1;
+ 		break;
+-- 
+2.43.0

@@ -1,0 +1,52 @@
+diff --git a/cvm_os/kernel/arch/x86_64/main.c b/cvm_os/kernel/arch/x86_64/main.c
+index 84b8b9f..f8a0a6d 100644
+--- a/cvm_os/kernel/arch/x86_64/main.c
++++ b/cvm_os/kernel/arch/x86_64/main.c
+@@ -29,6 +29,13 @@
+ #ifdef CHCORE_PLAT_AMD_SEV
+ #include <sev.h>
+ #endif /* CHCORE_PLAT_AMD_SEV */
++#if defined(CHCORE_PLAT_INTEL_TDX) && defined(CHCORE_SPLIT_CONTAINER)
++#include <tdx.h>
++#include <split-container/split_container.h>
++#define EARLY_TDX_PROBE_ENABLED 1
++#else
++#define EARLY_TDX_PROBE_ENABLED 0
++#endif
+ // #include <arch/time.h>
+ 
+ /* Global big kernel lock */
+@@ -58,15 +65,33 @@ void init_fpu_owner_locks(void);
+ // 	while (1);
+ // }
+ 
++#if EARLY_TDX_PROBE_ENABLED
++static void tdx_early_debug_puts(const char *s)
++{
++	while (*s) {
++		tdx_do_hypercall(
++			VMCALL_SC_REQUEST, SC_REQ_DEBUG_PUTC, *s++, 0, 0);
++	}
++}
++#else
++static void tdx_early_debug_puts(const char *s)
++{
++	(void)s;
++}
++#endif
++
+ void main(u64 mbmagic, paddr_t mbaddr)
+ {
+ 	u32 ret = 0;
+ 
++	tdx_early_debug_puts("[ChCore probe] main entry before uart_init\n");
++
+ #ifdef CHCORE_PLAT_AMD_SEV
+ 	sev_snp_init_per_cpu_ghcb(0);
+ #endif /* CHCORE_PLAT_AMD_SEV */
+ 
+ 	uart_init();
++	tdx_early_debug_puts("[ChCore probe] after uart_init\n");
+ 	kinfo("[ChCore] uart init finished\n");
+ 
+ 	// evaluate_vmexit();

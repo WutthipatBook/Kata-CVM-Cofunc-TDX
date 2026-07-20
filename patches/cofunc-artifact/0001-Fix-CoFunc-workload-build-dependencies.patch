@@ -1,0 +1,141 @@
+From a17b97339b11313351ff464f4e7becec9e16d1d1 Mon Sep 17 00:00:00 2001
+From: JaehyeonLee <ljhhasang@gmail.com>
+Date: Thu, 11 Jun 2026 07:07:53 +0000
+Subject: [PATCH] Fix CoFunc workload build dependencies
+
+---
+ .../fn_js_wage_analysis_result/prepare.py     | 21 ++++++++++++++-----
+ .../fn_py_finra_audit_fast/Dockerfile         |  2 +-
+ .../fn_py_finra_audit_slow/Dockerfile         |  2 +-
+ .../fn_py_finra_fetch_fast/Dockerfile         |  2 +-
+ .../fn_py_finra_fetch_slow/Dockerfile         |  2 +-
+ .../fn_py_dna_visualisation/Dockerfile        |  2 +-
+ testcases/testcases/fn_py_linpack/Dockerfile  |  2 +-
+ testcases/testcases/fn_py_matmul/Dockerfile   |  2 +-
+ .../testcases/fn_py_sentiment/Dockerfile      |  6 +-----
+ 9 files changed, 24 insertions(+), 17 deletions(-)
+
+diff --git a/testcases/testcases/chain_js_data_analysis/fn_js_wage_analysis_result/prepare.py b/testcases/testcases/chain_js_data_analysis/fn_js_wage_analysis_result/prepare.py
+index 8d99728..748cac4 100755
+--- a/testcases/testcases/chain_js_data_analysis/fn_js_wage_analysis_result/prepare.py
++++ b/testcases/testcases/chain_js_data_analysis/fn_js_wage_analysis_result/prepare.py
+@@ -1,7 +1,18 @@
+ #!/bin/python
+-import couchdb
++from base64 import b64encode
++from urllib.error import HTTPError
++from urllib.request import Request, urlopen
+ 
+-couch = couchdb.Server("http://admin:password@localhost:5984")
+-
+-if not "wage-statistics" in couch:
+-    couch.create("wage-statistics")
++credentials = b64encode(b"admin:password").decode("ascii")
++req = Request(
++    "http://localhost:5984/wage-statistics",
++    data=b"",
++    headers={"Authorization": f"Basic {credentials}"},
++    method="PUT",
++)
++try:
++    with urlopen(req) as resp:
++        resp.read()
++except HTTPError as exc:
++    if exc.code != 412:
++        raise
+diff --git a/testcases/testcases/chain_py_finra/fn_py_finra_audit_fast/Dockerfile b/testcases/testcases/chain_py_finra/fn_py_finra_audit_fast/Dockerfile
+index a798ce7..b2f9e99 100644
+--- a/testcases/testcases/chain_py_finra/fn_py_finra_audit_fast/Dockerfile
++++ b/testcases/testcases/chain_py_finra/fn_py_finra_audit_fast/Dockerfile
+@@ -1,4 +1,4 @@
+ FROM python:3.11-alpine3.17
+ RUN pip install requests
+-RUN pip install --extra-index-url https://alpine-wheels.github.io/index numpy pandas
++RUN pip install numpy==1.26.4 pandas==2.2.3
+ COPY main.py /func/main.py
+diff --git a/testcases/testcases/chain_py_finra/fn_py_finra_audit_slow/Dockerfile b/testcases/testcases/chain_py_finra/fn_py_finra_audit_slow/Dockerfile
+index 5c2223f..66b33a3 100644
+--- a/testcases/testcases/chain_py_finra/fn_py_finra_audit_slow/Dockerfile
++++ b/testcases/testcases/chain_py_finra/fn_py_finra_audit_slow/Dockerfile
+@@ -1,4 +1,4 @@
+ FROM python:3.11-alpine3.17
+ RUN pip install boto3
+-RUN pip install --extra-index-url https://alpine-wheels.github.io/index numpy pandas
++RUN pip install numpy==1.26.4 pandas==2.2.3
+ COPY main.py /func/main.py
+diff --git a/testcases/testcases/chain_py_finra/fn_py_finra_fetch_fast/Dockerfile b/testcases/testcases/chain_py_finra/fn_py_finra_fetch_fast/Dockerfile
+index 0e4d542..e116ae1 100644
+--- a/testcases/testcases/chain_py_finra/fn_py_finra_fetch_fast/Dockerfile
++++ b/testcases/testcases/chain_py_finra/fn_py_finra_fetch_fast/Dockerfile
+@@ -1,6 +1,6 @@
+ FROM python:3.11-alpine3.17
+ RUN pip install boto3
+-RUN pip install --extra-index-url https://alpine-wheels.github.io/index numpy pandas
++RUN pip install numpy==1.26.4 pandas==2.2.3
+ RUN pip install requests
+ COPY /tools/template.py /func/main.py
+ COPY prewarm.py /func/prewarm.py
+diff --git a/testcases/testcases/chain_py_finra/fn_py_finra_fetch_slow/Dockerfile b/testcases/testcases/chain_py_finra/fn_py_finra_fetch_slow/Dockerfile
+index 0e4d542..e116ae1 100644
+--- a/testcases/testcases/chain_py_finra/fn_py_finra_fetch_slow/Dockerfile
++++ b/testcases/testcases/chain_py_finra/fn_py_finra_fetch_slow/Dockerfile
+@@ -1,6 +1,6 @@
+ FROM python:3.11-alpine3.17
+ RUN pip install boto3
+-RUN pip install --extra-index-url https://alpine-wheels.github.io/index numpy pandas
++RUN pip install numpy==1.26.4 pandas==2.2.3
+ RUN pip install requests
+ COPY /tools/template.py /func/main.py
+ COPY prewarm.py /func/prewarm.py
+diff --git a/testcases/testcases/fn_py_dna_visualisation/Dockerfile b/testcases/testcases/fn_py_dna_visualisation/Dockerfile
+index 8a10069..27f0ae8 100644
+--- a/testcases/testcases/fn_py_dna_visualisation/Dockerfile
++++ b/testcases/testcases/fn_py_dna_visualisation/Dockerfile
+@@ -1,5 +1,5 @@
+ FROM python:alpine3.17
+-RUN pip install minio squiggle==0.3.1
++RUN pip install minio numpy==1.26.4 squiggle==0.3.1
+ RUN mkdir func
+ COPY /tools/template.py /func/main.py
+ COPY prewarm.py /func/prewarm.py
+diff --git a/testcases/testcases/fn_py_linpack/Dockerfile b/testcases/testcases/fn_py_linpack/Dockerfile
+index 7862586..c74c4c1 100644
+--- a/testcases/testcases/fn_py_linpack/Dockerfile
++++ b/testcases/testcases/fn_py_linpack/Dockerfile
+@@ -1,5 +1,5 @@
+ FROM python:alpine3.17
+-RUN pip install --extra-index-url https://alpine-wheels.github.io/index numpy
++RUN pip install numpy==1.26.4
+ RUN mkdir func
+ COPY /tools/template.py /func/main.py
+ COPY prewarm.py /func/prewarm.py
+diff --git a/testcases/testcases/fn_py_matmul/Dockerfile b/testcases/testcases/fn_py_matmul/Dockerfile
+index 7862586..c74c4c1 100644
+--- a/testcases/testcases/fn_py_matmul/Dockerfile
++++ b/testcases/testcases/fn_py_matmul/Dockerfile
+@@ -1,5 +1,5 @@
+ FROM python:alpine3.17
+-RUN pip install --extra-index-url https://alpine-wheels.github.io/index numpy
++RUN pip install numpy==1.26.4
+ RUN mkdir func
+ COPY /tools/template.py /func/main.py
+ COPY prewarm.py /func/prewarm.py
+diff --git a/testcases/testcases/fn_py_sentiment/Dockerfile b/testcases/testcases/fn_py_sentiment/Dockerfile
+index 1741547..1ca9790 100644
+--- a/testcases/testcases/fn_py_sentiment/Dockerfile
++++ b/testcases/testcases/fn_py_sentiment/Dockerfile
+@@ -1,10 +1,6 @@
+ FROM python:alpine3.17
+-ENV HTTPS_PROXY="http://ipads:ipads123@202.120.40.82:11235"
+-ENV HTTP_PROXY="http://ipads:ipads123@202.120.40.82:11235"
+-RUN pip install textblob
++RUN pip install --no-cache-dir --index-url https://pypi.org/simple textblob==0.17.1 nltk==3.8.1
+ RUN python -m textblob.download_corpora
+-ENV HTTPS_PROXY=""
+-ENV HTTP_PROXY=""
+ RUN mkdir func
+ COPY /tools/template.py /func/main.py
+ COPY prewarm.py /func/prewarm.py
+-- 
+2.34.1
+
