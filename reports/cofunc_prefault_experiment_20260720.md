@@ -120,3 +120,47 @@ accepts `COFUNC_OLDABI_RUNTIME_REPETITIONS`. A one-shot non-face run must use
 `STOP_AFTER_SMOKE=0`, `COFUNC_OLDABI_SKIP_FACE_SMOKE=1`, a single
 `COFUNC_OLDABI_RUNTIME_WORKLOADS` entry, and
 `COFUNC_OLDABI_RUNTIME_REPETITIONS=1`.
+
+## DNA pre-fault failure and containment
+
+The corrected one-shot DNA selection ran at:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_dna_smoke_corrected_20260720_142935`
+
+It returned `run_rc=124`; the postflight gate remained
+`host_safety=ready`. This run is failed evidence and must not be aggregated.
+
+- Selection was correct: the run-local parameter file contains only
+  `fn_py_dna_visualisation 1`, the mandatory face smoke was disabled, and
+  automatic retries were disabled.
+- The CVM booted normally and reached the ChCore shell.
+- The DNA `sc-snapshot` stage granted 2 GiB and completed pre-faulting its
+  entire 1,928 MiB private buddy data range:
+
+  ```text
+  CoFunc private pre-fault: gpa=0x904800000 bytes=2069889024 chunks=987 cycles=26680295360
+  ```
+
+- Immediately after the marker, ChCore reported
+  `handle_trans_fault: no vmr found for va 0x3120` for
+  `CMD: /usr/local/bin/python`. No `snapshot done` marker followed.
+- `sc-snapshot.sh` had no internal timeout or child-exit check, so it waited
+  until the outer 1,200-second workload timeout returned 124.
+- Host logs contain no KVM/TDX stop marker, log loss, OOM, or page-state
+  failure. Cleanup removed the CVM and the postflight safety gate passed.
+- The transient workload log is preserved at
+  `/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_dna_smoke_corrected_20260720_142935/failure-evidence/dna_snapshot_exec_log`
+  with SHA-256
+  `c1efea8bdac09ab56adb0f5dad68e4b5bf29521bba7dddd79fe38465f8975449`.
+
+Known-good on-demand DNA evidence completed 10/10 in
+`oldabi_guarded_0022_dna_only_retry_20260708_073256`, so the prefault path is
+the differentiating trigger. The failure is not yet proof that bulk MapGPA
+granularity is the root cause. Patch 0009 is the next controlled A/B: it
+keeps all acceptance before process launch but performs one MapGPA/accept per
+allocator chunk, matching the established demand path. Patch 0010 bounds the
+snapshot wait and preserves the last 80 diagnostic lines on failure.
+
+After rebuilding, validation must restart with one isolated face smoke under
+the changed prefault implementation, followed by one DNA smoke only if face
+passes. No automatic retry, churn, or matrix run is permitted.
