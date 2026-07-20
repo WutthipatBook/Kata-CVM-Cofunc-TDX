@@ -9,10 +9,7 @@ session=split-container-snapshot-${slot_id}
 clean() {
         until [[ -z $(docker ps -a | grep snapshot) ]]; do
                 sudo pkill -9 sc-runtime || true
-                docker ps -a --format '{{.Names}}' | grep snapshot | xargs -r docker rm -f &>/dev/null || true
-                sleep 1
         done
-        sudo screen -X -S $session quit &>/dev/null || true
         screen -X -S $session quit &>/dev/null || true
 }
 

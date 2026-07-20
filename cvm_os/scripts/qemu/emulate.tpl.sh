@@ -10,7 +10,6 @@
 # See the Mulan PSL v2 for more details.
 
 set -e
-set -o pipefail
 
 basedir=$(dirname "$0")
 # basedir should be /build directory
@@ -23,22 +22,7 @@ port=$(shuf -i 30000-40000 -n 1)
 #		break
 #	fi
 #done
-gdb_port_file=${COFUNC_GDB_PORT_FILE:-$basedir/gdb-port}
-if ! { echo $port >"$gdb_port_file"; } 2>/dev/null; then
-	echo $port >"/tmp/chcore-gdb-port-${SLOT_ID:-0}"
-fi
+echo $port >$basedir/gdb-port
 
-exec_log=exec_log_${SLOT_ID:-0}
-tee_args=("$exec_log")
-if [ -n "${COFUNC_TRACE_DIR:-}" ] && mkdir -p "${COFUNC_TRACE_DIR}" 2>/dev/null; then
-    tee_args+=("${COFUNC_TRACE_DIR}/${exec_log}")
-fi
-
-{
-    printf 'timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'slot=%s\n' "${SLOT_ID:-0}"
-    printf 'qemu=%s\n' "@qemu@"
-    printf 'gdb_port=%s\n' "$port"
-    "$basedir/../scripts/qemu/qemu_wrapper.sh" \
-        @qemu@ -gdb tcp::$port @qemu_options@
-} 2>&1 | tee "${tee_args[@]}"
+$basedir/../scripts/qemu/qemu_wrapper.sh \
+    @qemu@ -gdb tcp::$port @qemu_options@ | tee exec_log_${SLOT_ID:-0}

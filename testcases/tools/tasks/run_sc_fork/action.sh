@@ -11,16 +11,6 @@ tools=$(dirname $(realpath $0))/../..
 
 pushd $tools/../testcases/$fn_name
 
-cleanup() {
-        set +e
-        $tools/sc-snapshot.sh clean
-        $tools/cvm.sh clean
-        $tools/lean_container/rootfs.sh clean
-        $tools/lean_container/cgroup.sh clean
-        $tools/hugepage.sh clean
-}
-trap cleanup EXIT
-
 mkdir -p $log_dir
 rm -f $log_file
 
@@ -30,14 +20,18 @@ fi
 
 $tools/lean_container/rootfs.sh
 $tools/lean_container/cgroup.sh
-$tools/hugepage.sh
+# $tools/hugepage.sh
 
 $tools/cvm.sh
 $tools/sc-snapshot.sh
 
 sudo $tools/lean_container/start.sh sc-fork $log_file $times
 
-trap - EXIT
-cleanup
+$tools/sc-snapshot.sh clean
+$tools/cvm.sh clean
+
+$tools/lean_container/rootfs.sh clean
+$tools/lean_container/cgroup.sh clean
+# $tools/hugepage.sh clean
 
 popd

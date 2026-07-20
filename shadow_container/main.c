@@ -8,7 +8,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <stdarg.h>
 #include <pthread.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
@@ -58,9 +57,7 @@ static unsigned long mem_size = 2048UL * 1024 * 1024; // fake
 static int small_shared_pool = 0;
 static unsigned long gpa;
 static void *anon;
-#if defined(CONFIG_PLAT_INTEL_TDX)
-static int guest_memfd = -1;
-#elif defined(CONFIG_PLAT_AMD_SEV)
+#if defined(CONFIG_PLAT_AMD_SEV)
 static int memfd;
 #endif
 static int argc;
@@ -68,23 +65,8 @@ static char **argv;
 static const char *mem_file = NULL;
 static int enable_sync = 1;
 static unsigned vm_slot_id = 0;
-static int sc_diag_enabled;
 
 static int finish = 0;
-
-static void sc_diag(const char *fmt, ...)
-{
-        va_list ap;
-
-        if (!sc_diag_enabled) {
-                return;
-        }
-
-        va_start(ap, fmt);
-        fprintf(stderr, "[SC-D] ");
-        vfprintf(stderr, fmt, ap);
-        va_end(ap);
-}
 
 static void pin(int cpu)
 {
@@ -113,27 +95,27 @@ static void print_time(const char *str)
 #if defined(CONFIG_PLAT_INTEL_TDX)
 static long get_vmcall_op(struct kvm_run *run)
 {
-        return run->hypercall.nr;
+        return run->tdx.u.vmcall.subfunction;
 }
 
 static long get_vmcall_arg1(struct kvm_run *run)
 {
-        return run->hypercall.args[0];
+        return run->tdx.u.vmcall.in_r12;
 }
 
 static long get_vmcall_arg2(struct kvm_run *run)
 {
-        return run->hypercall.args[1];
+        return run->tdx.u.vmcall.in_r13;
 }
 
 static long get_vmcall_arg3(struct kvm_run *run)
 {
-        return run->hypercall.args[2];
+        return run->tdx.u.vmcall.in_r14;
 }
 
 static void set_vmcall_ret(struct kvm_run *run, long ret)
 {
-        run->hypercall.ret = ret;
+        run->tdx.u.vmcall.out_r11 = ret;
 }
 #elif defined(CONFIG_PLAT_AMD_SEV)
 static long get_vmcall_op(struct kvm_run *run)
@@ -167,9 +149,7 @@ static void grant_mem(void)
 {
         int ret;
 #if defined(CONFIG_PLAT_INTEL_TDX)
-        struct kvm_userspace_memory_region2 mem;
-        struct kvm_create_guest_memfd gmem;
-        struct kvm_memory_attributes attr;
+        struct kvm_userspace_memory_region mem;
 #elif defined(CONFIG_PLAT_AMD_SEV)
         struct kvm_userspace_memory_region2 mem;
 #endif
@@ -213,26 +193,13 @@ static void grant_mem(void)
 
         anon = (void *)ALIGN_UP((unsigned long)anon, HPAGE_SIZE);
 
-        memset(&mem, 0, sizeof(mem));
         mem.userspace_addr = (unsigned long)anon;
         mem.guest_phys_addr = gpa;
         mem.slot = slot;
         mem.flags = 0;
         mem.memory_size = mem_size;
 
-#if defined(CONFIG_PLAT_INTEL_TDX)
-        memset(&gmem, 0, sizeof(gmem));
-        gmem.size = mem_size;
-        guest_memfd = ioctl(kvm_vm_fd, KVM_CREATE_GUEST_MEMFD, &gmem);
-        if (guest_memfd < 0) {
-                perror("create guest_memfd");
-                exit(EXIT_FAILURE);
-        }
-
-        mem.flags = KVM_MEM_GUEST_MEMFD;
-        mem.guest_memfd = guest_memfd;
-        mem.guest_memfd_offset = 0;
-#elif defined(CONFIG_PLAT_AMD_SEV)
+#if defined(CONFIG_PLAT_AMD_SEV)
         memfd = syscall(451, 0); // __NR_memfd_restricted
         if (memfd < 0) {
                 perror("create memfd");
@@ -245,7 +212,7 @@ static void grant_mem(void)
 #endif
 
 #if defined(CONFIG_PLAT_INTEL_TDX)
-        ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION2, &mem);
+        ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION, &mem);
 #elif defined(CONFIG_PLAT_AMD_SEV)
         ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION2, &mem);
 #endif
@@ -255,18 +222,6 @@ static void grant_mem(void)
                 exit(EXIT_FAILURE);
         }
 
-#if defined(CONFIG_PLAT_INTEL_TDX)
-        memset(&attr, 0, sizeof(attr));
-        attr.address = gpa;
-        attr.size = mem_size;
-        attr.attributes = KVM_MEMORY_ATTRIBUTE_PRIVATE;
-        ret = ioctl(kvm_vm_fd, KVM_SET_MEMORY_ATTRIBUTES, &attr);
-        if (ret < 0) {
-                perror("initialize private memory attributes");
-                exit(EXIT_FAILURE);
-        }
-#endif
-
         debug("[SC-H] grant_mem: HVA=%p\n", anon);
 }
 
@@ -274,7 +229,7 @@ static void remove_mem(void)
 {
         int ret;
 #if defined(CONFIG_PLAT_INTEL_TDX)
-        struct kvm_userspace_memory_region2 mem;
+        struct kvm_userspace_memory_region mem;
 #elif defined(CONFIG_PLAT_AMD_SEV)
         struct kvm_userspace_memory_region2 mem;
 #endif
@@ -283,23 +238,18 @@ static void remove_mem(void)
                 return;
         }
 
-        memset(&mem, 0, sizeof(mem));
         mem.userspace_addr = (unsigned long long)anon;
         mem.guest_phys_addr = gpa;
         mem.slot = slot;
         mem.flags = 0;
         mem.memory_size = 0;
-#if defined(CONFIG_PLAT_INTEL_TDX)
-        mem.guest_memfd = guest_memfd;
-        mem.guest_memfd_offset = 0;
-#endif
 #if defined(CONFIG_PLAT_AMD_SEV)
         mem.restrictedmem_fd = memfd;
         mem.restrictedmem_offset = 0;
 #endif
 
 #if defined(CONFIG_PLAT_INTEL_TDX)
-        ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION2, &mem);
+        ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION, &mem);
 #elif defined(CONFIG_PLAT_AMD_SEV)
         ret = ioctl(kvm_vm_fd, KVM_SET_USER_MEMORY_REGION2, &mem);
 #endif
@@ -309,27 +259,19 @@ static void remove_mem(void)
                 exit(EXIT_FAILURE);
         }
 
-#if defined(CONFIG_PLAT_INTEL_TDX)
-        if (guest_memfd >= 0) {
-                close(guest_memfd);
-                guest_memfd = -1;
-        }
-#endif
-
         debug("[SC-H] remove mem\n");
 }
 
-static void sc_assert(int x, const char *expr, const char *file, int line)
+static void __assert(int x)
 {
         if (!x) {
-                fprintf(stderr, "[SC-D] assert failed: %s at %s:%d\n",
-                        expr, file, line);
+                debug("error!\n");
                 remove_mem();
                 exit(EXIT_FAILURE);
         }
 }
 #undef assert
-#define assert(x) sc_assert((x), #x, __FILE__, __LINE__)
+#define assert __assert
 
 double t_shadow_begin;
 double t_sc_init;
@@ -1134,13 +1076,8 @@ static void __handle_request_with_shm(struct sc_shm *shm)
 }
 
 static void handle_request_with_shm(unsigned long shm_gpa)
-{
-        struct sc_shm *shm = anon + (shm_gpa - gpa);
-
-        sc_diag("shm request gpa=0x%lx req=%d\n", shm_gpa, shm->req);
-        __handle_request_with_shm(shm);
-        sc_diag("shm request done req=%d ret=%ld time=%lu\n",
-                shm->req, shm->ret, shm->time);
+{        
+        __handle_request_with_shm(anon + (shm_gpa - gpa));
 }
 
 void vcpu_pause(void)
@@ -1236,13 +1173,7 @@ void wait_finish(void)
 
 static void handle_request(struct kvm_run *run)
 {
-        long req = get_vmcall_arg1(run);
-
-        sc_diag("request req=%ld arg2=0x%lx arg3=0x%lx ret=%ld\n",
-                req, get_vmcall_arg2(run), get_vmcall_arg3(run),
-                run->hypercall.ret);
-
-        switch (req) {
+        switch (get_vmcall_arg1(run)) {
         case SC_REQ_DEBUG_PUTC:
                 putchar(get_vmcall_arg2(run));
                 fflush(stdout);
@@ -1296,82 +1227,11 @@ static void handle_request(struct kvm_run *run)
         }
 }
 
-static void handle_map_gpa_range(struct kvm_run *run, int kvm_vcpu_fd)
-{
-        struct kvm_memory_attributes attr;
-        struct kvm_pre_fault_memory fault;
-        unsigned long map_gpa = get_vmcall_arg1(run);
-        unsigned long npages = get_vmcall_arg2(run);
-        unsigned long attrs = get_vmcall_arg3(run);
-        unsigned long map_size = npages << 12;
-        unsigned long offset;
-        int in_shadow_region;
-        int ret;
-        int saved_errno = 0;
-
-        memset(&attr, 0, sizeof(attr));
-        attr.address = map_gpa;
-        attr.size = map_size;
-        attr.attributes = (attrs & KVM_MAP_GPA_RANGE_ENCRYPTED) ?
-                KVM_MEMORY_ATTRIBUTE_PRIVATE : 0;
-
-        ret = ioctl(kvm_vm_fd, KVM_SET_MEMORY_ATTRIBUTES, &attr);
-        if (ret < 0) {
-                saved_errno = errno;
-        }
-
-        sc_diag("map_gpa gpa=0x%lx pages=0x%lx attrs=0x%lx kvm_attrs=0x%lx ret=%d errno=%d\n",
-                map_gpa, npages, attrs, attr.attributes, ret, saved_errno);
-
-        if (ret < 0) {
-                set_vmcall_ret(run, -saved_errno);
-                return;
-        }
-
-        in_shadow_region = map_gpa >= gpa &&
-                map_size <= mem_size &&
-                map_gpa - gpa <= mem_size - map_size;
-        if (in_shadow_region) {
-                offset = map_gpa - gpa;
-                if (attr.attributes == KVM_MEMORY_ATTRIBUTE_PRIVATE) {
-                        ret = madvise(anon + offset, map_size, MADV_DONTNEED);
-                        if (ret < 0) {
-                                sc_diag("discard shared backing failed offset=0x%lx size=0x%lx errno=%d\n",
-                                        offset, map_size, errno);
-                        }
-#if defined(CONFIG_PLAT_INTEL_TDX)
-                } else if (guest_memfd >= 0) {
-                        ret = fallocate(guest_memfd,
-                                        FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                                        offset, map_size);
-                        if (ret < 0) {
-                                sc_diag("discard private backing failed offset=0x%lx size=0x%lx errno=%d\n",
-                                        offset, map_size, errno);
-                        }
-#endif
-                }
-        }
-
-        memset(&fault, 0, sizeof(fault));
-        fault.gpa = map_gpa;
-        fault.size = map_size;
-        while (fault.size) {
-                if (ioctl(kvm_vcpu_fd, KVM_PRE_FAULT_MEMORY, &fault) < 0) {
-                        sc_diag("prefault skipped gpa=0x%lx size=0x%lx errno=%d\n",
-                                fault.gpa, fault.size, errno);
-                        break;
-                }
-        }
-
-        set_vmcall_ret(run, 0);
-}
-
 static void *shadow_thread_routine(void *args)
 {
         int kvm_vcpu_fd, ret;
         struct kvm_run *run;
         long thread = (long)args;
-        unsigned long iter = 0;
 
         kvm_vcpu_fd = ioctl(kvm_vm_fd, KVM_SC_ALLOC_VCPU);
         if (kvm_vcpu_fd < 0) {
@@ -1387,8 +1247,6 @@ static void *shadow_thread_routine(void *args)
         }
 
         set_vmcall_ret(run, thread);
-        sc_diag("vcpu allocated fd=%d thread=0x%lx initial_ret=0x%lx\n",
-                kvm_vcpu_fd, thread, run->hypercall.ret);
         for (;;) {
                 ret = ioctl(kvm_vcpu_fd, KVM_RUN, 0);
                 if (ret < 0 && errno == EINTR) {
@@ -1399,19 +1257,11 @@ static void *shadow_thread_routine(void *args)
                         exit(EXIT_FAILURE);
                 }
 
-                sc_diag("kvm_run iter=%lu exit=%u op=0x%lx arg1=0x%lx arg2=0x%lx arg3=0x%lx ret=0x%lx\n",
-                        iter++, run->exit_reason, get_vmcall_op(run),
-                        get_vmcall_arg1(run), get_vmcall_arg2(run),
-                        get_vmcall_arg3(run), run->hypercall.ret);
-
                 switch (get_vmcall_op(run)) {
                 case VMCALL_SC_VCPU_IDLE:
                         goto out;
                 case VMCALL_SC_REQUEST:
                         handle_request(run);
-                        break;
-                case KVM_HC_MAP_GPA_RANGE:
-                        handle_map_gpa_range(run, kvm_vcpu_fd);
                         break;
                 default:
                         assert(0);
@@ -1516,8 +1366,6 @@ static void parse_vm_slot_params(void)
 int main(int __argc, char *__argv[])
 {       
         struct sigaction sa;
-
-        sc_diag_enabled = getenv("SC_DIAG") != NULL;
 
         argc = __argc - 1;
         argv = __argv + 1;

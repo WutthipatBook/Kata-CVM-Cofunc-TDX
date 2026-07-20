@@ -89,7 +89,6 @@ void init_per_cpu_info(u32 cpuid)
 void enable_smp_cores(void)
 {
 	int cpuid;
-	int cpu_num;
 #ifndef CHCORE_PLAT_INTEL_TDX
 	u64 mp_code;
 
@@ -100,8 +99,11 @@ void enable_smp_cores(void)
         memmove((void *)mp_code, (void *)(&_mp_start), (u64)(&_mp_start_end) - (u64)(&_mp_start));
 #endif /* CHCORE_PLAT_INTEL_TDX */
 
-	cpu_num = MIN((int)PLAT_CPU_NUM, (int)get_cpu_count());
-	for (cpuid = 1; cpuid < cpu_num; cpuid ++)
+	/*
+	 * TODO: Since we can detect the real CPU number by reading the MADT,
+	 * we can avoid using the static PLAT_CPU_NUM.
+	 */
+	for (cpuid = 1; cpuid < PLAT_CPU_NUM; cpuid ++)
 	{
 		/* Set kernel stack */
 		cur_cpu_stack = cpu_stacks[cpuid] + CPU_STACK_SIZE;

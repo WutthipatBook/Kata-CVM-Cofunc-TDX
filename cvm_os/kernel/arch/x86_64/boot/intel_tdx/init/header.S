@@ -78,6 +78,7 @@ EXPORT(_start)
 	movl %eax, %edi /* multiboot_magic */
 	movl %ebx, %esi /* multiboot_info_ptr */
 
+	wbinvd
 	/* set init stack */
 	movl $PADDR(stack+KSTACKSIZE), %esp
 

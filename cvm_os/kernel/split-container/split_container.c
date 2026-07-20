@@ -54,7 +54,7 @@ struct {
 static long hypercall(u32 nr, u64 p1, u64 p2, u64 p3)
 {
 #if defined(CHCORE_PLAT_INTEL_TDX)
-        return tdx_do_hypercall(nr, p1, p2, p3, 0);
+        return tdx_do_hypercall(TDX_HYPERCALL_STANDARD, nr, p1, p2, p3);
 #elif defined(CHCORE_PLAT_AMD_SEV)
         return sev_snp_do_hypercall(nr, p1, p2, p3);
 #else

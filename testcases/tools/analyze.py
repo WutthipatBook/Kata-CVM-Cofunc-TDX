@@ -6,17 +6,12 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-l", "--log")
-parser.add_argument(
-    "--input-log",
-    default="exec_log",
-    help="Timing-marker input log (defaults to the legacy ./exec_log).",
-)
 args = parser.parse_args()
 
 
 mode = ""
 data = {}
-with open(args.input_log, "r") as log_file:
+with open("exec_log", "r") as log_file:
     for line in log_file:
         if line.startswith("t_"):
             tag, val = line[:-1].split()
@@ -41,16 +36,6 @@ def report(result, log_filename):
 
 
 result = {"timestamp": time.time()}
-
-def add_native_stage_breakdown(request_start):
-    if "t_func_load_begin" not in data:
-        return
-    result["t_setup"] = data["t_func_load_begin"] - request_start
-    result["t_func_load"] = data["t_import_done"] - data["t_func_load_begin"]
-    result["t_handler"] = result["t_exec"]
-    result["t_stage_sum"] = result["t_setup"] + result["t_func_load"] + result["t_handler"]
-    if "t_e2e" in result:
-        result["t_stage_gap"] = result["t_e2e"] - result["t_stage_sum"]
 
 def handle_others():
     global result, data
@@ -98,14 +83,12 @@ def handle_lean_fork():
     result["t_boot"] = data["t_import_done"] - data["t_fork_begin"]
     result["t_exec"] = data["t_func_done"] - data["t_import_done"]
     result["t_e2e"] = data["t_func_done"] - data["t_fork_begin"]
-    add_native_stage_breakdown(data["t_fork_begin"])
 
 
 def handle_lean_launch():
     result["t_boot"] = data["t_import_done"] - data["t_launch_begin"]
     result["t_exec"] = data["t_func_done"] - data["t_import_done"]
     result["t_e2e"] = data["t_func_done"] - data["t_launch_begin"]
-    add_native_stage_breakdown(data["t_launch_begin"])
 
 
 def handle_lean_sc_fork():
@@ -148,26 +131,6 @@ def handle_runc_linux_fork():
     result["t_boot"] = data["t_import_done"] - data["t_fork_begin"]
 
 
-def add_exec_resource_metrics():
-    for key in [
-        "n_minflt_exec",
-        "n_majflt_exec",
-        "n_nvcsw_exec",
-        "n_nivcsw_exec",
-        "n_inblock_exec",
-        "n_oublock_exec",
-        "t_cpu_exec",
-        "t_network",
-    ]:
-        if key in data:
-            result[key] = data[key]
-
-    if "t_exec" in result and "t_network" in data:
-        result["t_exec_minus_workload_network"] = (
-            result["t_exec"] - data["t_network"]
-        )
-
-
 if mode == "lean-fork":
     handle_lean_fork()
 elif mode == "lean-launch":
@@ -186,7 +149,6 @@ else:
     handle_others()
 
 
-add_exec_resource_metrics()
 report(result, args.log)
 
 # print("RunC Init: {}".format(data["t_runc_init"] - data["t_begin"]))
@@ -205,3 +167,5 @@ report(result, args.log)
 #     print("IO Data (Code): {}".format(data["io_cnt_lib"]))
 #     print("IO Data (Tmpfs): {}".format(data["io_cnt_tmp"]))
 #     print("IO Data (Network): {}".format(data["io_cnt_net"]))
+
+

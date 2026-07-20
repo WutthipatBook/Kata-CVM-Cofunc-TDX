@@ -30,10 +30,10 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/chcore.iso
 # Paths are intentionally overridable because this artifact is migrated between
 # local and server hosts.
 set(COFUNC_TDX_QEMU
-    "\${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}"
+    "\${COFUNC_TDX_QEMU:-/mnt/new_disk/cofunc_tdx_artifact/install/qemu-tdx-2022-09-01-cofunc/bin/qemu-system-x86_64}"
 )
 set(COFUNC_TDX_OVMF
-    "\${COFUNC_TDX_OVMF:-/mnt/nvme_500g/cofunc_tdx_artifact/firmware/ovmf-inteltdx_2025.02-8ubuntu3.1/usr/share/ovmf/OVMF.inteltdx.fd}"
+    "\${COFUNC_TDX_OVMF:-/mnt/new_disk/cofunc_tdx_artifact/firmware/ovmf-inteltdx_2025.02-8ubuntu3.1/usr/share/ovmf/OVMF.inteltdx.fd}"
 )
 set(COFUNC_TDX_QEMU_BIOS_DIR "\${COFUNC_TDX_QEMU_BIOS_DIR:-/usr/share/qemu}")
 set(COFUNC_TDX_SMP "\${COFUNC_TDX_SMP:-32}")

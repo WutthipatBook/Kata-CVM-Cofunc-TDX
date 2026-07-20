@@ -13,6 +13,5 @@
 #pragma once
 
 void parse_acpi_info(void *info);
-u8 get_cpu_count(void);
 u8 get_cpu_apic_id(int cpu_id);
 void madt_wakeup_cpu(int apic_id, u64 wakeup_vector);

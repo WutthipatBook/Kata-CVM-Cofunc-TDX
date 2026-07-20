@@ -1,5 +1,5 @@
 FROM python:alpine3.17
-RUN pip install numpy==1.26.4
+RUN pip install --extra-index-url https://alpine-wheels.github.io/index numpy
 RUN mkdir func
 COPY /tools/template.py /func/main.py
 COPY prewarm.py /func/prewarm.py

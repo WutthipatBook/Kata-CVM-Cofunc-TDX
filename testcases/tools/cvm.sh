@@ -56,21 +56,18 @@ touch "$exec_log"
         printf 'boot_timeout=%s\n' "$boot_timeout"
         printf 'max_vcpus=%s\n' "$max_vcpus"
         printf 'tdx_smp=%s\n' "$tdx_smp"
-        printf 'qemu=%s\n' "${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}"
+        printf 'qemu=%s\n' "${COFUNC_TDX_QEMU:-/mnt/new_disk/cofunc_tdx_artifact/install/qemu-tdx-2022-09-01-cofunc/bin/qemu-system-x86_64}"
         uname -a
-        "${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}" --version 2>&1 | head -5 || true
+        "${COFUNC_TDX_QEMU:-/mnt/new_disk/cofunc_tdx_artifact/install/qemu-tdx-2022-09-01-cofunc/bin/qemu-system-x86_64}" --version 2>&1 | head -5 || true
         cp -a build/simulate.sh "$trace_dir/simulate.sh" 2>/dev/null || true
 } >"$trace_dir/launch-env.log" 2>&1 || true
 
 run_maybe_sudo env \
-	SLOT_ID="$slot_id" \
-	COFUNC_TDX_SMP="$tdx_smp" \
-	COFUNC_TDX_QEMU="${COFUNC_TDX_QEMU:-/mnt/nvme_500g/cofunc_tdx_artifact/install/qemu-ubuntu-tdx/bin/qemu-system-x86_64}" \
-	COFUNC_TDX_OVMF="${COFUNC_TDX_OVMF:-/mnt/nvme_500g/cofunc_tdx_artifact/firmware/ovmf-inteltdx_2025.02-8ubuntu3.1/usr/share/ovmf/OVMF.inteltdx.fd}" \
-	COFUNC_TDX_QEMU_BIOS_DIR="${COFUNC_TDX_QEMU_BIOS_DIR:-/usr/share/qemu}" \
-	COFUNC_TRACE_DIR="$trace_dir" \
-	COFUNC_GDB_PORT_FILE="$trace_dir/gdb-port" \
-	screen -L -Logfile "$trace_dir/screen.log" -dmS "$session" build/simulate.sh
+        SLOT_ID="$slot_id" \
+        COFUNC_TDX_SMP="$tdx_smp" \
+        COFUNC_TRACE_DIR="$trace_dir" \
+        COFUNC_GDB_PORT_FILE="$trace_dir/gdb-port" \
+        screen -L -Logfile "$trace_dir/screen.log" -dmS "$session" build/simulate.sh
 
 start_ts=$(date +%s)
 until grep -q "ChCore shell" "$exec_log"; do

@@ -176,7 +176,8 @@ void wrpkru(int pkru)
 
 /* enable/disable turbo boost */
 #define TURBO_DISABLE_BIT 38
-#define TURBO_DISABLE_MASK (1UL << TURBO_DISABLE_BIT)
+#define TURBO_DISABLE_MASK (1 << (38 - 32))
+#define TURBO_ENABLE_MASK (~TURBO_DISABLE_MASK)
 void set_turbo_boost(void)
 {
 	u64 val;
@@ -185,12 +186,12 @@ void set_turbo_boost(void)
 	// kinfo("%s, rdmsr: hi=%08x lo=%08x\n", __func__, hi, lo);
 #if TURBO_ENABLED == 1
 	/* enable CPU turbo boost */
-	val &= ~TURBO_DISABLE_MASK;
+	val = val & ((u64)TURBO_ENABLE_MASK << 32);
 	kinfo("Intel Turbo Boost is ENABLED.\n");
 #else
 	/* disable CPU turbo boost */
 
-	val |= TURBO_DISABLE_MASK;
+	val = val | ((u64)TURBO_DISABLE_MASK << 32);
 	kinfo("Intel Turbo Boost is DISABLED.\n");
 #endif
 	wrmsr(0x1a0, val);
@@ -286,9 +287,8 @@ void arch_cpu_init(void)
 	asm volatile ("finit":::"memory");
 	ldmxcsr(0x1f80);
 
-#ifndef CHCORE_PLAT_INTEL_TDX
+
 	set_turbo_boost();
-#endif
 
 #if LBR_ENABLED == 1
 	enable_lbr();
