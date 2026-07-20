@@ -35,18 +35,20 @@ guest first-level demand paging or CoW faults.
 
 `./chbuild build kernel` recognized
 `CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=ON`. The new split-container source
-compiled and `kernel.img` linked successfully:
+compiled, `kernel.img` linked, and `chcore.iso` packaged successfully:
 
 - `kernel.img` SHA-256:
-  `6ccdc8390a16bdbb230840f957358d312a72e36983ec9a9614390195668666d3`
+  `2b4965ffb9555dd5512f91b34894af4560ee32a79896a7390bb38aabcbd18f9f`
+- `chcore.iso` SHA-256:
+  `2f771404b4237fd34ba2a950160843b195bf92683839daa1aa2e9241e644d1c0`
 - `split_container.c.obj` SHA-256:
   `a9f260d2ff98bbb82dc16eaf4899a6789f4d79c2d258e7e57e8c489ef312dd99`
 - The linked image contains `CoFunc private pre-fault:`.
 - Kernel compile flags contain `-DCHCORE_SPLIT_CONTAINER_PREFAULT`.
 
-ISO packaging did not complete. `grub-mkrescue` failed in `mformat` after the
-kernel link because the existing build tree is owned by `nobody:nogroup` and
-is not writable by `booklyn`. No VM was launched.
+The first unprivileged packaging attempt failed because the existing build
+tree is owned by `nobody:nogroup`. Re-running the packaging target with sudo
+produced the final ISO at 2026-07-20 13:47:33 UTC. No VM was launched.
 
 ## Required validation boundary
 
