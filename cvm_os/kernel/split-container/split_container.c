@@ -275,6 +275,7 @@ static unsigned long prefault_private_mem_pool(void)
         unsigned long size = mem_pool->pool_mem_size;
         unsigned long addr;
         unsigned long gpa;
+        unsigned long chunk_gpa;
         unsigned long t0, t1;
         struct page *hpage;
 
@@ -283,14 +284,15 @@ static unsigned long prefault_private_mem_pool(void)
 
         gpa = virt_to_phys((void *)start);
         t0 = get_cycles();
-        change_phys_state(gpa, gpa + size, 1);
-        t1 = get_cycles();
-
         for (addr = start; addr < start + size; addr += ACCEPT_PAGE_SIZE) {
+                chunk_gpa = virt_to_phys((void *)addr);
+                change_phys_state(chunk_gpa,
+                                  chunk_gpa + ACCEPT_PAGE_SIZE, 1);
                 hpage = __virt_to_page(mem_pool, (void *)addr);
                 BUG_ON(hpage->sc_accepted);
                 hpage->sc_accepted = 1;
         }
+        t1 = get_cycles();
 
         printk("CoFunc private pre-fault: gpa=0x%lx bytes=%lu chunks=%lu cycles=%lu\n",
                gpa, size, size / ACCEPT_PAGE_SIZE, t1 - t0);
