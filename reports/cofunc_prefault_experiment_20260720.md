@@ -61,3 +61,46 @@ After packaging, run one isolated face-detection smoke only. Required proof:
 - no automatic retry.
 
 Do not run churn or the Fig. 11 matrix until this boundary passes.
+
+## Isolated face-smoke validation
+
+The required boundary passed on 2026-07-20. Evidence is preserved at:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_face_smoke_20260720_135605`
+
+- The preflight and postflight host-safety gates both reported
+  `host_safety=ready`.
+- The runner completed on its only allowed attempt: `run_rc=0`,
+  `postflight_gate_rc=0`, `STOP_AFTER_SMOKE=1`, and
+  `COFUNC_KVM_BUSY_RETRIES=1`.
+- The workload produced one canonical pre-fault event. The same console line
+  is copied into the attempt log and canonical run log:
+
+  ```text
+  CoFunc private pre-fault: gpa=0x703600000 bytes=478150656 chunks=228 cycles=5579790134
+  ```
+
+  The 512 MiB host grant loses 2 MiB to the existing reservation and 48 MiB
+  to the shared pool. Buddy metadata and 2 MiB alignment consume another
+  6 MiB, leaving the reported 456 MiB private allocator data range. Thus the
+  228 2 MiB chunks cover the complete private buddy data pool.
+- Runtime instrumentation reported `n_accept_import=0` and
+  `n_accept_exec=0`. The private acceptance work therefore finished during
+  split-container initialization rather than import or handler execution.
+- The workload still had `n_cow=3400`, `t_pgfault_import=0.000902878 s`, and
+  `t_pgfault_exec=0.039062914 s`. This confirms that the experiment removes
+  deferred TDX private-page acceptance, not guest first-level demand paging
+  or CoW behavior.
+- All 64 bounded private TDP-MMU records had `req=1`, `goal=1`, and
+  `iter_level=1`. There were zero private level-2 records and zero private
+  2 MiB promotions.
+- Searches found zero KVM/TDX stop markers and zero kernel-log-loss markers.
+  The successful postflight gate found no unsafe runtime residue.
+- Functional timing was `t_boot_sc=2.043746948 s`, `t_exec=1.486075401 s`,
+  and `t_e2e=3.544019461 s`. Pre-fault cost remains included in the cold
+  start as intended.
+
+The isolated validation boundary is passed. The next bounded step is one
+memory-intensive workload smoke with the same one-attempt and safety-gate
+rules. Churn and full-matrix measurements remain out of scope until that
+step is clean.
