@@ -485,3 +485,38 @@ cycles. The validation report is
 (SHA-256
 `07957a510fa69a191ba7943178cec15223aecec3af112c83afc183eeeab84e8f`).
 The next bounded runtime step is one isolated DNA telemetry smoke.
+
+## DNA fault-telemetry result and combined conclusion
+
+The isolated DNA run passed on one launch with ready pre/post safety gates:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_dna_fault_telemetry_20260721_101315`
+
+It recorded 680,115 first-level execution faults and 919,355,966 fault-path
+cycles at a guest-calibrated 2,800,182,785 Hz. This is 0.328319984 seconds in
+`do_page_fault`, 482.741865 ns per fault, and 1.780566% of the
+18.439082861-second handler interval. There were 2,728 CoW faults (0.401109%)
+and zero deferred accepts. The complete 1,008,730,112-byte private pool was
+pre-faulted in 481 chunks over approximately 2.901099435 seconds.
+
+The CoFunc count is 3.472697% above the earlier Native DNA mean
+(657,289.333) and 1.298436% above the Kata mean (671,397.333). The prior
+Native/Kata pilot's `run_rc=125` was independently validated as a
+post-collection shell error; all six samples and the EPT trace completed. The
+Kata trace found zero EPT violations in the DNA handler window, just as it did
+for Video. Its 527,416 violations per VM occurred during cold-VM setup.
+
+Together, Video and DNA show similar first-level fault frequency across
+Native, Kata, and pre-fault CoFunc. CoFunc `do_page_fault` time was only
+1.983050% of Video execution and 1.780566% of DNA execution. Therefore,
+neither first-level fault frequency nor the measured CoFunc first-level fault
+path explains the large remaining CoFunc execution-time gap. Native/Linux
+per-fault service and host-side CoFunc SEPT/EPT exits remain unmeasured and
+require separate instrumentation.
+
+The DNA run had zero private 2 MiB promotions, private level-2 mapping
+markers, KVM/TDX stop markers, kernel-log loss, or residual Kata/QEMU objects.
+Its detailed report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_dna_fault_telemetry_20260721_101315/validation_report.md`
+(SHA-256
+`732a9a43a3004db96f013b2b17edd6fb05123ed4a20150dacd249a9771aeb7e2`).

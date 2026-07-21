@@ -9125,3 +9125,35 @@ The detailed report is
 `07957a510fa69a191ba7943178cec15223aecec3af112c83afc183eeeab84e8f`).
 The next bounded boundary is one isolated DNA telemetry smoke, not a
 multi-sample run.
+
+### CoFunc pre-fault DNA fault telemetry
+
+The isolated run at
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_dna_fault_telemetry_20260721_101315`
+passed on one launch with ready pre/post safety gates. It measured 680,115
+first-level execution faults and 919,355,966 cycles at a guest-reported
+2,800,182,785 Hz: 0.328319984 seconds total, 482.741865 ns per fault, and
+1.780566% of handler execution. It reported 2,728 CoW faults and zero deferred
+accepts. Pre-fault covered the complete 1,008,730,112-byte private pool in 481
+chunks over approximately 2.901099435 seconds.
+
+The count is 3.472697% above the validated Native DNA mean and 1.298436%
+above the Kata mean. The earlier Native/Kata pilot's nonzero top-level result
+was a post-collection shell bug; the preserved six successful samples and
+complete EPT trace were validated separately. Kata had zero EPT violations
+during DNA handler execution, with all 527,416 per-VM violations outside that
+window.
+
+Combined with Video, the diagnostic establishes similar first-level fault
+frequency across all three modes. CoFunc first-level fault handling accounts
+for less than 2% of execution in both workloads and cannot explain the large
+remaining execution-time gap. Native/Linux per-fault service time and
+host-side CoFunc SEPT/EPT exits remain unmeasured.
+
+The DNA run had zero private level-2 mapping markers, private 2 MiB
+promotions, KVM/TDX stop markers, kernel-log loss, or residual Kata/QEMU
+objects. The detailed report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_dna_fault_telemetry_20260721_101315/validation_report.md`
+(SHA-256
+`732a9a43a3004db96f013b2b17edd6fb05123ed4a20150dacd249a9771aeb7e2`).
+Do not start another VM as part of this diagnostic boundary.
