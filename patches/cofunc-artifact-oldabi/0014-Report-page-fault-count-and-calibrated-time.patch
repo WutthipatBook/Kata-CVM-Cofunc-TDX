@@ -1,0 +1,156 @@
+From: CoFunc TDX artifact reproduction <noreply@example.com>
+Date: Tue, 21 Jul 2026 08:20:00 +0000
+Subject: [PATCH] runtime: report page-fault count and calibrated time
+
+Read the new first-level fault count and guest-calibrated TSC frequency around
+handler execution. Preserve raw cycles and derive seconds only when the guest
+frequency is present.
+---
+ testcases/tools/analyze.py  | 18 ++++++++++++++----
+ testcases/tools/template.js | 12 ++++++++++++
+ testcases/tools/template.py | 11 +++++++++++
+ 3 files changed, 37 insertions(+), 4 deletions(-)
+
+diff --git a/testcases/tools/analyze.py b/testcases/tools/analyze.py
+index b224919..9bbe1e1 100755
+--- a/testcases/tools/analyze.py
++++ b/testcases/tools/analyze.py
+@@ -112,12 +112,17 @@ def handle_lean_sc_fork():
+     result["t_boot_func"] = data["t_import_done"] - data["t_sc_init"]
+     result["t_exec"] = data["t_func_done"] - data["t_import_done"]
+     result["t_e2e"] = data["t_func_done"] - data["t_launch_begin"]
+-    for key in ["n_hcalls_exec", "n_cow", "n_accept_exec", "n_accept_import"]:
++    for key in ["n_hcalls_exec", "n_cow", "n_accept_exec", "n_accept_import", "n_pgfault_exec", "n_pgfault_import"]:
+         if key in data:
+             result[key] = data[key]
+     for key in ["t_encrypt_exec", "t_grant_exec", "t_delegate_exec", "t_attest_import", "t_grant_import", "t_delegate_import", "t_pgfault_exec", "t_pgfault_import"]:
+         if key in data:
+-            result[key if not key.startswith("t_pgfault") else f"{key}_cycles"] = data[key] / (1 if key.startswith("t_pgfault") else 10 ** 9)
++            if key.startswith("t_pgfault"):
++                result[f"{key}_cycles"] = data[key]
++                if data.get("sc_guest_tsc_hz", 0) > 0:
++                    result[key] = data[key] / data["sc_guest_tsc_hz"]
++            else:
++                result[key] = data[key] / 10 ** 9
+     add_instrumentation_metrics()
+ 
+ 
+@@ -125,12 +130,17 @@ def handle_lean_sc_launch():
+     result["t_boot"] = data["t_import_done"] - data["t_launch_begin"]
+     result["t_exec"] = data["t_func_done"] - data["t_import_done"]
+     result["t_e2e"] = data["t_func_done"] - data["t_launch_begin"]
+-    for key in ["n_hcalls_exec", "n_cow", "n_accept_exec", "n_accept_import"]:
++    for key in ["n_hcalls_exec", "n_cow", "n_accept_exec", "n_accept_import", "n_pgfault_exec", "n_pgfault_import"]:
+         if key in data:
+             result[key] = data[key]
+     for key in ["t_encrypt_exec", "t_grant_exec", "t_delegate_exec", "t_attest_import", "t_grant_import", "t_delegate_import", "t_pgfault_exec", "t_pgfault_import"]:
+         if key in data:
+-            result[key if not key.startswith("t_pgfault") else f"{key}_cycles"] = data[key] / (1 if key.startswith("t_pgfault") else 10 ** 9)
++            if key.startswith("t_pgfault"):
++                result[f"{key}_cycles"] = data[key]
++                if data.get("sc_guest_tsc_hz", 0) > 0:
++                    result[key] = data[key] / data["sc_guest_tsc_hz"]
++            else:
++                result[key] = data[key] / 10 ** 9
+     add_instrumentation_metrics()
+ 
+ 
+diff --git a/testcases/tools/template.js b/testcases/tools/template.js
+index f525af6..1fc6c01 100644
+--- a/testcases/tools/template.js
++++ b/testcases/tools/template.js
+@@ -34,6 +34,8 @@ fn_code = __fs.readFileSync('/func/execute.js') + '';
+ 
+ const STAT_N_ACCEPT = 0x7;
+ const STAT_T_PGFAULT = 0x8;
++const STAT_N_PGFAULT = 0x9;
++const STAT_TSC_HZ = 0xa;
+ 
+ t_attest_after_import = sc.stat_get_stat(0x3);
+ t_import_done = Date.now() / 1000;
+@@ -44,6 +46,8 @@ t_grant_before_exec = sc.stat_get_stat(0x5);
+ t_delegate_before_exec = sc.stat_get_stat(0x6);
+ n_accept_before_exec = sc.stat_get_stat(STAT_N_ACCEPT);
+ t_pgfault_before_exec = sc.stat_get_stat(STAT_T_PGFAULT);
++n_pgfault_before_exec = sc.stat_get_stat(STAT_N_PGFAULT);
++tsc_hz = sc.stat_get_stat(STAT_TSC_HZ);
+ eval(fn_code);
+ 
+ SendRequest('http://127.0.0.1:8888/get_param', {
+@@ -63,6 +67,7 @@ SendRequest('http://127.0.0.1:8888/get_param', {
+       n_cow = sc.stat_get_stat(0x2);
+       n_accept_after_exec = sc.stat_get_stat(STAT_N_ACCEPT);
+       t_pgfault_after_exec = sc.stat_get_stat(STAT_T_PGFAULT);
++      n_pgfault_after_exec = sc.stat_get_stat(STAT_N_PGFAULT);
+       t_func_done = Date.now() / 1000;
+       console.log(`t_import_done ${t_import_done}`);
+       console.log(`t_func_done ${t_func_done}`);
+@@ -79,6 +84,9 @@ SendRequest('http://127.0.0.1:8888/get_param', {
+             console.log(`sc_guest_n_accept_after ${n_accept_after_exec}`);
+             console.log(`sc_guest_t_pgfault_before ${t_pgfault_before_exec}`);
+             console.log(`sc_guest_t_pgfault_after ${t_pgfault_after_exec}`);
++            console.log(`sc_guest_n_pgfault_before ${n_pgfault_before_exec}`);
++            console.log(`sc_guest_n_pgfault_after ${n_pgfault_after_exec}`);
++            console.log(`sc_guest_tsc_hz ${tsc_hz}`);
+             if (n_accept_before_exec >= 0) {
+                   console.log(`n_accept_exec ${n_accept_after_exec - n_accept_before_exec}`);
+                   console.log(`n_accept_import ${n_accept_before_exec}`);
+@@ -87,6 +95,10 @@ SendRequest('http://127.0.0.1:8888/get_param', {
+                   console.log(`t_pgfault_exec ${t_pgfault_after_exec - t_pgfault_before_exec}`);
+                   console.log(`t_pgfault_import ${t_pgfault_before_exec}`);
+             }
++            if (n_pgfault_before_exec >= 0) {
++                  console.log(`n_pgfault_exec ${n_pgfault_after_exec - n_pgfault_before_exec}`);
++                  console.log(`n_pgfault_import ${n_pgfault_before_exec}`);
++            }
+       }
+     })
+   })  
+diff --git a/testcases/tools/template.py b/testcases/tools/template.py
+index fd4e549..ab20202 100644
+--- a/testcases/tools/template.py
++++ b/testcases/tools/template.py
+@@ -18,6 +18,8 @@ STAT_T_GRANT    = 0x5
+ STAT_T_DELEGATE = 0x6
+ STAT_N_ACCEPT   = 0x7
+ STAT_T_PGFAULT  = 0x8
++STAT_N_PGFAULT  = 0x9
++STAT_TSC_HZ     = 0xa
+ 
+ 
+ def get_param(fn_name):
+@@ -89,6 +91,8 @@ t_grant_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_GRANT)
+ t_delegate_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_DELEGATE)
+ n_accept_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_ACCEPT)
+ t_pgfault_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_PGFAULT)
++n_pgfault_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_PGFAULT)
++tsc_hz = _cofunc_syscall(SYS_SC_GET_STAT, STAT_TSC_HZ)
+ exec(fn_code)
+ param = get_param(fn_name)
+ retval = handler(param)
+@@ -100,6 +104,7 @@ t_delegate_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_DELEGATE)
+ n_cow = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_COWS)
+ n_accept_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_ACCEPT)
+ t_pgfault_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_PGFAULT)
++n_pgfault_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_PGFAULT)
+ # _cofunc_syscall(SYS_SC_DEFER_ENCRYPT, 0)
+ 
+ t_func_done = time.time()
+@@ -123,9 +128,15 @@ if n_hcalls_before_exec >= 0:
+     print(f"sc_guest_n_accept_after {n_accept_after_exec}")
+     print(f"sc_guest_t_pgfault_before {t_pgfault_before_exec}")
+     print(f"sc_guest_t_pgfault_after {t_pgfault_after_exec}")
++    print(f"sc_guest_n_pgfault_before {n_pgfault_before_exec}")
++    print(f"sc_guest_n_pgfault_after {n_pgfault_after_exec}")
++    print(f"sc_guest_tsc_hz {tsc_hz}")
+     if n_accept_before_exec >= 0:
+         print(f"n_accept_exec {n_accept_after_exec - n_accept_before_exec}")
+         print(f"n_accept_import {n_accept_before_exec}")
+     if t_pgfault_before_exec >= 0:
+         print(f"t_pgfault_exec {t_pgfault_after_exec - t_pgfault_before_exec}")
+         print(f"t_pgfault_import {t_pgfault_before_exec}")
++    if n_pgfault_before_exec >= 0:
++        print(f"n_pgfault_exec {n_pgfault_after_exec - n_pgfault_before_exec}")
++        print(f"n_pgfault_import {n_pgfault_before_exec}")
+-- 
+2.43.0

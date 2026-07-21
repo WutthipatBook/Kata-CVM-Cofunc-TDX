@@ -9,6 +9,7 @@ RUNTIME_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0003-Use-TDX-shadow-runtim
 HUGEPAGE_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0004-Enable-hugepage-setup-for-old-ABI-run-sc-fork.patch"
 RUNTIME_EXTRA_PATCH="${COFUNC_OLDABI_RUNTIME_EXTRA_PATCH:-}"
 RUNTIME_FOLLOWUP_PATCH="${COFUNC_OLDABI_RUNTIME_FOLLOWUP_PATCH:-}"
+RUNTIME_METRICS_PATCH="${COFUNC_OLDABI_RUNTIME_METRICS_PATCH:-}"
 CPU_SMOKE="$BUNDLE/scripts/run_oldabi_turbo_msr_skip_cpu_bound_smoke.sh"
 DEFAULT_WORKLOAD="fn_py_face_detection"
 TOOLS="$ARTIFACT/testcases/tools"
@@ -29,7 +30,7 @@ if [[ $STOP_AFTER_SMOKE_VALUE == 0 ]]; then
 fi
 OUT="${OUT:-$ROOT/results/oldabi_5_19_turbo_smp_bound_tdx_runtime_${OUT_KIND}_$STAMP}"
 IMAGE_TAG_BACKUP="pre-oldabi-tdx-runtime-$STAMP"
-RUNTIME_EXTRA_MARKERS='CoFunc grant/accept stat instrumentation|sc_host_grant_total_ns|STAT_N_ACCEPT|n_accept_exec|t_pgfault_exec'
+RUNTIME_EXTRA_MARKERS='CoFunc grant/accept stat instrumentation|sc_host_grant_total_ns|STAT_N_ACCEPT|n_accept_exec|t_pgfault_exec|STAT_N_PGFAULT|n_pgfault_exec|sc_guest_tsc_hz'
 backup_done=0
 SELECTED_WORKLOADS=()
 DOCKER_BUILD_CACHE_ARGS=()
@@ -178,9 +179,11 @@ verify_workload_image() {
 	fi
 	if ! docker run --rm "$image:latest" sh -c \
 		"grep -nF '_cofunc_syscall.restype = ctypes.c_long' /func/main.py && \
-		 grep -nF 't_pgfault_after_exec = _cofunc_syscall(' /func/main.py" \
+		 grep -nF 't_pgfault_after_exec = _cofunc_syscall(' /func/main.py && \
+		 grep -nF 'n_pgfault_after_exec = _cofunc_syscall(' /func/main.py && \
+		 grep -nF 'sc_guest_tsc_hz' /func/main.py" \
 		| tee "$BACKUP_DIR/$image.syscall-restype"; then
-		die "$image:latest does not preserve the 64-bit syscall binding across workload exec"
+		die "$image:latest does not contain the calibrated page-fault instrumentation"
 	fi
 	docker image inspect "$base_image:latest" "$image:latest" \
 		>"$BACKUP_DIR/$image.verified-images.json"
@@ -239,6 +242,10 @@ main() {
 	if [[ -n $RUNTIME_FOLLOWUP_PATCH ]]; then
 		[[ -n $RUNTIME_EXTRA_PATCH ]] || die "runtime follow-up patch requires an extra runtime patch"
 		[[ -f "$RUNTIME_FOLLOWUP_PATCH" ]] || die "missing runtime follow-up patch: $RUNTIME_FOLLOWUP_PATCH"
+	fi
+	if [[ -n $RUNTIME_METRICS_PATCH ]]; then
+		[[ -n $RUNTIME_FOLLOWUP_PATCH ]] || die "runtime metrics patch requires the follow-up patch"
+		[[ -f "$RUNTIME_METRICS_PATCH" ]] || die "missing runtime metrics patch: $RUNTIME_METRICS_PATCH"
 	fi
 	[[ -x "$CPU_SMOKE" ]] || die "missing smoke helper: $CPU_SMOKE"
 	[[ -f "$ACTION_SH" ]] || die "missing run_sc_fork action: $ACTION_SH"
@@ -307,6 +314,7 @@ main() {
 	{
 		printf 'cofunc_oldabi_runtime_extra_patch=%s\n' "$RUNTIME_EXTRA_PATCH"
 		printf 'cofunc_oldabi_runtime_followup_patch=%s\n' "$RUNTIME_FOLLOWUP_PATCH"
+		printf 'cofunc_oldabi_runtime_metrics_patch=%s\n' "$RUNTIME_METRICS_PATCH"
 		printf 'cofunc_oldabi_skip_face_smoke=%s\n' "$SKIP_FACE_SMOKE_VALUE"
 		printf 'cofunc_oldabi_regular_memfile=%s\n' "${COFUNC_OLDABI_REGULAR_MEMFILE:-0}"
 		printf 'docker_build_cache_args=%s\n' "${DOCKER_BUILD_CACHE_ARGS[*]}"
@@ -340,6 +348,16 @@ main() {
 					|| die "runtime follow-up patch did not add the private 64-bit syscall binding"
 				rg -q 't_pgfault_after_exec = _cofunc_syscall' "$TEMPLATE_PY" \
 					|| die "runtime follow-up patch did not preserve the post-exec syscall binding"
+			fi
+			if [[ -n $RUNTIME_METRICS_PATCH ]]; then
+				log "applying calibrated page-fault metrics patch: $RUNTIME_METRICS_PATCH"
+				patch -d "$ARTIFACT" -p1 -i "$RUNTIME_METRICS_PATCH"
+				rg -q 'n_pgfault_after_exec = _cofunc_syscall' "$TEMPLATE_PY" \
+					|| die "runtime metrics patch did not add the Python fault count"
+				rg -q 'sc_guest_tsc_hz' "$TEMPLATE_PY" "$TEMPLATE_JS" \
+					|| die "runtime metrics patch did not add guest TSC telemetry"
+				rg -q 'data\["sc_guest_tsc_hz"\]' "$ANALYZE_PY" \
+					|| die "runtime metrics patch did not add calibrated analyzer conversion"
 			fi
 		fi
 	sha256sum "$CONFIG_H" "$SHADOW_MAIN_C" "$ACTION_SH" "$LEAN_START_SH" "$TEMPLATE_PY" "$TEMPLATE_JS" "$ANALYZE_PY" \

@@ -4,27 +4,28 @@ Date: Mon, 29 Jun 2026 08:40:00 +0000
 Subject: [PATCH] split-container: expose guest accept and pgfault stats
 
 CoFunc grant time currently maps to sc_t_accept, but the workload JSON only
-reports t_grant_exec and n_cow. Expose sc_n_accept and sc_t_pgfault through
-SYS_SC_GET_STAT so the workload templates can separate guest TDX accept count
-from page-fault handling time.
+reports t_grant_exec and n_cow. Expose accept count, page-fault count and
+cycles, and the guest-calibrated TSC frequency through SYS_SC_GET_STAT.
 ---
- cvm_os/kernel/split-container/split_container.c | 8 ++++++++
- 1 file changed, 8 insertions(+)
+ cvm_os/kernel/split-container/split_container.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
 
 --- a/cvm_os/kernel/split-container/split_container.c
 +++ b/cvm_os/kernel/split-container/split_container.c
-@@ -504,6 +504,10 @@ long add_polling(cap_t pmo_cap)
+@@ -546,6 +546,12 @@ long add_polling(cap_t pmo_cap)
  #define STAT_N_COWS     0x2
  #define STAT_T_GRANT    0x5
  #define STAT_T_FORK     0x6
 +/* CoFunc grant/accept stat instrumentation. */
 +#define STAT_N_ACCEPT   0x7
 +#define STAT_T_PGFAULT  0x8
++#define STAT_N_PGFAULT  0x9
++#define STAT_TSC_HZ     0xa
 +
  long get_stat(int stat)
  {
          switch (stat) {
-@@ -513,6 +517,10 @@ long get_stat(int stat)
+@@ -555,6 +561,14 @@ long get_stat(int stat)
                  return current_cap_group->sc_n_cow;
          case STAT_T_GRANT:
                  return current_cap_group->sc_t_accept;
@@ -32,9 +33,12 @@ from page-fault handling time.
 +                return current_cap_group->sc_n_accept;
 +        case STAT_T_PGFAULT:
 +                return current_cap_group->sc_t_pgfault;
++        case STAT_N_PGFAULT:
++                return current_cap_group->sc_n_pgfault;
++        case STAT_TSC_HZ:
++                return cur_freq;
          // case STAT_T_FORK:
          //         return current_cap_group->sc_t_fork;
          default:
 -- 
 2.43.0
-

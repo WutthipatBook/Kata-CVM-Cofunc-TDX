@@ -7,6 +7,7 @@ RUNNER="$BUNDLE/scripts/run_oldabi_turbo_smp_bound_tdx_runtime_instrumented.sh"
 CVM_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0006-Diagnostic-expose-guest-accept-pgfault-stats.patch"
 RUNTIME_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0007-Diagnostic-emit-grant-accept-runtime-metrics.patch"
 RUNTIME_FOLLOWUP_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0012-Preserve-Python-syscall-binding-across-workload-exec.patch"
+RUNTIME_METRICS_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0014-Report-page-fault-count-and-calibrated-time.patch"
 THP_ENABLED="/sys/kernel/mm/transparent_hugepage/enabled"
 STAMP="$(date -u +%Y%m%d_%H%M%S)"
 OUT="${OUT:-$ROOT/results/oldabi_5_19_turbo_smp_bound_tdx_runtime_instrumented_thp_never_$STAMP}"
@@ -30,6 +31,7 @@ main() {
 	[[ -f "$CVM_PATCH" ]] || die "missing CVM instrumentation patch: $CVM_PATCH"
 	[[ -f "$RUNTIME_PATCH" ]] || die "missing runtime instrumentation patch: $RUNTIME_PATCH"
 	[[ -f "$RUNTIME_FOLLOWUP_PATCH" ]] || die "missing runtime instrumentation follow-up patch: $RUNTIME_FOLLOWUP_PATCH"
+	[[ -f "$RUNTIME_METRICS_PATCH" ]] || die "missing calibrated page-fault metrics patch: $RUNTIME_METRICS_PATCH"
 	[[ -w "$THP_ENABLED" ]] || die "cannot write $THP_ENABLED"
 
 	local before restore_mode cleanup_done=0
@@ -75,6 +77,7 @@ main() {
 	export COFUNC_OLDABI_CVM_EXTRA_PATCH="$CVM_PATCH"
 	export COFUNC_OLDABI_RUNTIME_EXTRA_PATCH="$RUNTIME_PATCH"
 	export COFUNC_OLDABI_RUNTIME_FOLLOWUP_PATCH="$RUNTIME_FOLLOWUP_PATCH"
+	export COFUNC_OLDABI_RUNTIME_METRICS_PATCH="$RUNTIME_METRICS_PATCH"
 	set +e
 	"$RUNNER" "$@"
 	local rc=$?

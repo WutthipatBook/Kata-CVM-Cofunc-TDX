@@ -422,3 +422,27 @@ Detailed validation:
 `/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_video_private_syscall_20260721_073012/validation_report.md`
 (SHA-256
 `2a6768126d25e7f6c2899d7ecbb9876326d75543a5d67da5716d9c17522ce61f`).
+
+## Prepared fault-count and calibrated-time instrumentation
+
+No further VM has been launched. The next bounded phase is implemented but
+not yet applied to the active old-ABI source:
+
+- Patch 0013 adds an atomic per-cap-group first-level page-fault count and
+  makes the existing cumulative cycle update atomic.
+- Patch 0006 exposes the count, raw cycles, accept count, and guest-calibrated
+  `cur_freq` through `SYS_SC_GET_STAT`.
+- Patch 0014 reads count and frequency around handler execution. The analyzer
+  preserves `t_pgfault_*_cycles` and derives `t_pgfault_*` seconds only by
+  dividing by the guest-reported frequency.
+- The instrumented runner refuses to launch if the source change is absent,
+  the kernel ISO predates any changed source, or the rebuilt workload image
+  lacks the count/frequency markers.
+
+The complete patch sequence was applied to a fresh source clone and both
+Python files passed `py_compile`. A synthetic 2.8 GHz analyzer fixture emitted
+`n_pgfault_exec=4056821`, `t_pgfault_exec_cycles=3095835376`, and
+`t_pgfault_exec=1.1056554914285714`. This validates plumbing and arithmetic,
+not guest behavior. One isolated pre-fault video smoke is the next permitted
+runtime boundary after separately applying patch 0013 and rebuilding the
+baseline kernel ISO.

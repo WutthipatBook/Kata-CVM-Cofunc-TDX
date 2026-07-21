@@ -1,0 +1,83 @@
+From: CoFunc TDX artifact reproduction <noreply@example.com>
+Date: Tue, 21 Jul 2026 08:14:57 +0000
+Subject: [PATCH] split-container: count first-level page faults atomically
+
+The existing split-container statistic accumulates raw RDTSC deltas but does
+not count all first-level faults, and its non-atomic update can lose cycles
+when threads fault concurrently. Add a per-cap-group count, update both totals
+atomically after each successfully handled fault, and reset the count for new
+and copied cap groups.
+---
+ cvm_os/kernel/arch/x86_64/irq/irq_entry.c       | 8 ++++++--
+ cvm_os/kernel/include/object/cap_group.h        | 1 +
+ cvm_os/kernel/split-container/snapshot.c        | 2 ++
+ cvm_os/kernel/split-container/split_container.c | 2 ++
+ 4 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/cvm_os/kernel/arch/x86_64/irq/irq_entry.c b/cvm_os/kernel/arch/x86_64/irq/irq_entry.c
+index e289856..237d109 100644
+--- a/cvm_os/kernel/arch/x86_64/irq/irq_entry.c
++++ b/cvm_os/kernel/arch/x86_64/irq/irq_entry.c
+@@ -302,9 +302,13 @@ void trap_c(struct arch_exec_context *ec)
+ 			unsigned long t0 = get_cycles();
+                         do_page_fault(errorcode, ec->reg[RIP]);
+ 			unsigned long t1 = get_cycles();
+-			current_cap_group->sc_t_pgfault += t1 - t0;
++			unsigned long total;
++
++			total = __sync_add_and_fetch(&current_cap_group->sc_t_pgfault,
++						     t1 - t0);
++			__sync_fetch_and_add(&current_cap_group->sc_n_pgfault, 1);
+ 			if (current_cap_group->sc_u_t_pgfault) {
+-			        *current_cap_group->sc_u_t_pgfault = current_cap_group->sc_t_pgfault;
++			        *current_cap_group->sc_u_t_pgfault = total;
+ 			}
+ #else /* CHCORE_SPLIT_CONTAINER */
+ 			do_page_fault(errorcode, ec->reg[RIP]);
+diff --git a/cvm_os/kernel/include/object/cap_group.h b/cvm_os/kernel/include/object/cap_group.h
+index bfb66b2..e0a0171 100644
+--- a/cvm_os/kernel/include/object/cap_group.h
++++ b/cvm_os/kernel/include/object/cap_group.h
+@@ -80,6 +80,7 @@ struct cap_group {
+ 	unsigned long sc_t_accept;
+ 	unsigned long sc_n_accept;
+ 	unsigned long sc_t_pgfault;
++	unsigned long sc_n_pgfault;
+ 	unsigned long *sc_u_t_pgfault;
+ 	unsigned long sc_n_cow;
+ 	int sc_n_hcall;
+diff --git a/cvm_os/kernel/split-container/snapshot.c b/cvm_os/kernel/split-container/snapshot.c
+index 7c3d22e..e5684d6 100644
+--- a/cvm_os/kernel/split-container/snapshot.c
++++ b/cvm_os/kernel/split-container/snapshot.c
+@@ -118,6 +118,8 @@ struct cap_group *copy_cap_group(struct cap_group *src_cap_group, badge_t badge)
+ 
+         dst_cap_group->sc_t_accept = 0;
+         dst_cap_group->sc_n_accept = 0;
++        dst_cap_group->sc_t_pgfault = 0;
++        dst_cap_group->sc_n_pgfault = 0;
+         
+         return dst_cap_group;
+ }
+diff --git a/cvm_os/kernel/split-container/split_container.c b/cvm_os/kernel/split-container/split_container.c
+index 82750dd..6d6a623 100644
+--- a/cvm_os/kernel/split-container/split_container.c
++++ b/cvm_os/kernel/split-container/split_container.c
+@@ -479,6 +479,7 @@ long print_stat(const char *s)
+         printk("t_accept,%s %lu\n", s_k, current_cap_group->sc_t_accept);
+         printk("n_accept,%s %lu\n", s_k, current_cap_group->sc_n_accept);
+         printk("t_pgfault,%s %lu\n", s_k, current_cap_group->sc_t_pgfault);
++        printk("n_pgfault,%s %lu\n", s_k, current_cap_group->sc_n_pgfault);
+         printk("n_cow,%s %lu\n", s_k, current_cap_group->sc_n_cow);
+ 
+         return 0;
+@@ -759,6 +760,7 @@ void split_container_cap_group_init(struct cap_group *cap_group)
+         cap_group->sc_t_accept = 0;
+         cap_group->sc_n_accept = 0;
+         cap_group->sc_t_pgfault = 0;
++        cap_group->sc_n_pgfault = 0;
+         cap_group->sc_u_t_pgfault = NULL;
+         cap_group->sc_n_hcall = 0;
+         cap_group->sc_n_cow = 0;
+-- 
+2.43.0

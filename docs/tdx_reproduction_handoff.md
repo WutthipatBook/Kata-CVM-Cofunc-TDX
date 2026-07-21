@@ -9084,3 +9084,12 @@ Patch 0007 now emits `t_pgfault_exec_cycles` and
 fault-comparison phase must add both `sc_n_pgfault` and guest-calibrated TSC
 frequency telemetry before collecting DNA or video measurements. Do not use
 the legacy `t_pgfault_*` seconds fields from earlier analyzer JSON.
+
+The required telemetry is now prepared, but has not run in a VM. Patch 0013
+adds the atomic kernel count and cycle accumulation; patch 0006 exposes count
+and `cur_freq`; patch 0014 emits count, cycles, and calibrated seconds. The
+full sequence applies cleanly to a fresh source clone, the Python files
+compile, and a synthetic analyzer fixture gives the expected 2.8 GHz
+conversion. The active old-ABI source still needs patch 0013 plus a baseline
+kernel ISO rebuild. After that, the next boundary is one isolated video smoke,
+not DNA/video sampling.
