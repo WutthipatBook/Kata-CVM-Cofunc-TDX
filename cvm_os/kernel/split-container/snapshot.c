@@ -118,6 +118,8 @@ struct cap_group *copy_cap_group(struct cap_group *src_cap_group, badge_t badge)
 
         dst_cap_group->sc_t_accept = 0;
         dst_cap_group->sc_n_accept = 0;
+        dst_cap_group->sc_t_pgfault = 0;
+        dst_cap_group->sc_n_pgfault = 0;
         
         return dst_cap_group;
 }

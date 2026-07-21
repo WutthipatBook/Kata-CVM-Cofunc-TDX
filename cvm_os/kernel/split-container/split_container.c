@@ -479,6 +479,7 @@ long print_stat(const char *s)
         printk("t_accept,%s %lu\n", s_k, current_cap_group->sc_t_accept);
         printk("n_accept,%s %lu\n", s_k, current_cap_group->sc_n_accept);
         printk("t_pgfault,%s %lu\n", s_k, current_cap_group->sc_t_pgfault);
+        printk("n_pgfault,%s %lu\n", s_k, current_cap_group->sc_n_pgfault);
         printk("n_cow,%s %lu\n", s_k, current_cap_group->sc_n_cow);
 
         return 0;
@@ -759,6 +760,7 @@ void split_container_cap_group_init(struct cap_group *cap_group)
         cap_group->sc_t_accept = 0;
         cap_group->sc_n_accept = 0;
         cap_group->sc_t_pgfault = 0;
+        cap_group->sc_n_pgfault = 0;
         cap_group->sc_u_t_pgfault = NULL;
         cap_group->sc_n_hcall = 0;
         cap_group->sc_n_cow = 0;

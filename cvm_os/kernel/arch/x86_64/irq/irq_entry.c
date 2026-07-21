@@ -302,9 +302,13 @@ void trap_c(struct arch_exec_context *ec)
 			unsigned long t0 = get_cycles();
                         do_page_fault(errorcode, ec->reg[RIP]);
 			unsigned long t1 = get_cycles();
-			current_cap_group->sc_t_pgfault += t1 - t0;
+			unsigned long total;
+
+			total = __sync_add_and_fetch(&current_cap_group->sc_t_pgfault,
+						     t1 - t0);
+			__sync_fetch_and_add(&current_cap_group->sc_n_pgfault, 1);
 			if (current_cap_group->sc_u_t_pgfault) {
-			        *current_cap_group->sc_u_t_pgfault = current_cap_group->sc_t_pgfault;
+			        *current_cap_group->sc_u_t_pgfault = total;
 			}
 #else /* CHCORE_SPLIT_CONTAINER */
 			do_page_fault(errorcode, ec->reg[RIP]);

@@ -80,6 +80,7 @@ struct cap_group {
 	unsigned long sc_t_accept;
 	unsigned long sc_n_accept;
 	unsigned long sc_t_pgfault;
+	unsigned long sc_n_pgfault;
 	unsigned long *sc_u_t_pgfault;
 	unsigned long sc_n_cow;
 	int sc_n_hcall;
