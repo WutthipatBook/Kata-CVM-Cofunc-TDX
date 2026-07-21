@@ -9243,3 +9243,45 @@ Current analysis SHA-256:
 The Video pre-fault target is now proven. The next separately approved
 boundary is one traced `fn_py_dna_visualisation` launch. Do not launch DNA,
 measurements, or additional workloads automatically.
+
+### CoFunc pre-fault DNA EPT result
+
+The approved DNA boundary completed at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_162053`.
+The workload, trace command, analysis, and all safety/evidence checks passed.
+The experimental result is nevertheless negative: the authenticated handler
+gate recorded 505 EPT services and `prefault_target_passed=false`.
+
+The 505 records cost only 632,341 ns in total, with 1,252 ns mean and 1,211 ns
+median service. They are concentrated in three bursts: 122 and 128 pages near
+handler start and 255 pages about 5.23 seconds later. The first two bursts and
+third burst each represent approximately 1 MiB at 4 KiB per page. Guest
+telemetry reports 675,692 first-level faults, 0.348391434 seconds in the guest
+fault path, zero deferred accepts, and complete 1,008,730,112-byte private
+pre-fault coverage in 481 chunks.
+
+This does not yet prove that private pre-faulting missed 505 pages. The old
+trace format omitted the fault GPA and error code. The burst sizes are
+consistent with bounded allocations or I/O buffers, but shared/private
+ownership remains unknown. The validation report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_162053/dna_ept_validation_report.md`
+(SHA-256
+`a978d7961bff04d1d8a041adb4f0cda78f4389408cf0b4adcaa86e1aa1aa0564`).
+
+Prepared diagnostics now extend `EPT_SERVICE` with
+`kvm_page_fault.fault_address` and `error_code`. The analyzer classifies new
+events into the 60 MiB shared prefix, the pre-faulted private range, the 2 MiB
+reserved tail, or outside the granted 1 GiB slot. It also normalizes the TDX
+shared-GPA alias bits for 48- and 52-bit guests and reports private versus
+shared visibility separately. It retains support for both preserved
+nine-field traces.
+
+Prepared SHA-256:
+
+- `kata_tdx_ept_fault_trace.bt`: `32d4d14d3780a852ec4e58c44fc81ea95f74e62b276e57f5a09623d0bd953d3d`
+- `analyze_cofunc_ept_trace.py`: `c4bf4cabc27c978eca5f6a5c8a07452b204e035af88bf934527fcc5d0209e79e`
+- analyzer tests: `e06e0fedd51dd5fcb57f22c625677c1bf30e064d464ce74d513cccfebeb36056`
+
+The next separately approved boundary is a root-only bpftrace compile/dry-run
+check. If and only if it passes, run one isolated address-aware DNA launch.
+Do not retry, sample, modify KVM/guest code, or run another workload.

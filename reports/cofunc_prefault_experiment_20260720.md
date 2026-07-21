@@ -612,3 +612,45 @@ Updated SHA-256:
 Video now conclusively matches Kata's zero-handler-EPT result under CoFunc
 pre-faulting. The next separately approved runtime boundary is one traced DNA
 launch; do not run additional workloads or samples automatically.
+
+## DNA handler EPT result
+
+The isolated DNA launch at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_162053`
+completed with `run_rc=0`, ready pre/post safety gates, no trace loss, no
+prohibited KVM/TDX marker, exact runtime-source restoration, and no residue.
+Unlike Video, its authenticated handler gate contained 505 EPT service
+records, so `prefault_target_passed=false` is a valid negative experimental
+result.
+
+The residual cost is small and highly structured: 632,341 ns total, 1,252 ns
+mean, and 1,211 ns median. The events form bursts of 122 and 128 pages at the
+start of the handler, followed by 255 pages about 5.23 seconds later. The
+first two bursts total approximately 1 MiB of 4 KiB pages and the third totals
+approximately 1 MiB. All 505 events belong to the active handler lifecycle
+PID. Guest telemetry still reports zero deferred accepts and complete
+1,008,730,112-byte private pre-fault coverage in 481 2 MiB chunks.
+
+The preserved trace did not record `kvm_page_fault.fault_address` or
+`error_code`, so it cannot distinguish a private-pool pre-fault miss from
+shared/I/O buffers or other GPA ranges. Do not change the pre-fault algorithm
+from this trace alone. The detailed report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_162053/dna_ept_validation_report.md`
+(SHA-256
+`a978d7961bff04d1d8a041adb4f0cda78f4389408cf0b4adcaa86e1aa1aa0564`).
+
+An address-aware tracer now carries fault GPA and error code into each gated
+record. The analyzer remains backward-compatible, normalizes the TDX shared
+GPA alias bits used by 48- and 52-bit guests, and reports both normalized slot
+range and private/shared visibility. Tests cover legacy records, all four
+address classes, TDX shared aliases, multi-PID pairing, zero/nonzero gates,
+and unpaired rejection.
+
+Prepared SHA-256:
+
+- Tracer: `32d4d14d3780a852ec4e58c44fc81ea95f74e62b276e57f5a09623d0bd953d3d`
+- Analyzer: `c4bf4cabc27c978eca5f6a5c8a07452b204e035af88bf934527fcc5d0209e79e`
+- Tests: `e06e0fedd51dd5fcb57f22c625677c1bf30e064d464ce74d513cccfebeb36056`
+
+The next boundary is a root-only bpftrace dry-run followed, only if it passes,
+by one isolated address-aware DNA launch. Do not retry or run Video again.

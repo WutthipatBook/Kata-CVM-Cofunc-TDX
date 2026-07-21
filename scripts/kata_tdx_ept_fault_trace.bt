@@ -32,6 +32,10 @@ tracepoint:kvm:kvm_exit
 tracepoint:kvm:kvm_page_fault
 {
   @vm_ept_faults[pid] = count();
+  if (@detailed_exit[tid]) {
+    @ept_fault_address[tid] = args->fault_address;
+    @ept_fault_error_code[tid] = args->error_code;
+  }
 }
 
 tracepoint:kvm:kvm_entry
@@ -41,11 +45,14 @@ tracepoint:kvm:kvm_entry
   @vm_service_count[pid] = count();
   @vm_service_ns[pid] = sum($duration);
   if (@detailed_exit[tid]) {
-    printf("EPT_SERVICE\t%s\t%llu\t%llu\t%d\t%d\t%d\t%d\t%llu\n",
+    printf("EPT_SERVICE\t%s\t%llu\t%llu\t%d\t%d\t%d\t%d\t%llu\t%llu\t%llu\n",
            strftime("%s.%f", @ept_exit_ns[tid]), @ept_exit_ns[tid], nsecs,
-           pid, tid, @ept_exit_cpu[tid], cpu, $duration);
+           pid, tid, @ept_exit_cpu[tid], cpu, $duration,
+           @ept_fault_address[tid], @ept_fault_error_code[tid]);
   }
   delete(@detailed_exit[tid]);
+  delete(@ept_fault_address[tid]);
+  delete(@ept_fault_error_code[tid]);
   delete(@ept_exit_cpu[tid]);
   delete(@ept_exit_ns[tid]);
 }
@@ -54,6 +61,8 @@ END
 {
   clear(@enabled);
   clear(@detailed_exit);
+  clear(@ept_fault_address);
+  clear(@ept_fault_error_code);
   clear(@ept_exit_cpu);
   clear(@ept_exit_ns);
   printf("trace_status\tstopped\n");

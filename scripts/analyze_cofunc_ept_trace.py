@@ -17,6 +17,7 @@ AGGREGATE_NAMES = (
     "vm_service_count",
     "vm_service_ns",
 )
+TDX_SHARED_GPA_MASK_CANDIDATES = (1 << 47, 1 << 51)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +51,8 @@ def load_single_json_line(path: Path) -> dict[str, Any]:
         "t_pgfault_exec",
         "t_pgfault_exec_cycles",
         "sc_guest_tsc_hz",
+        "sc_host_gpa",
+        "sc_host_mem_size",
     )
     missing = [key for key in required if key not in rows[0]]
     if missing:
@@ -180,19 +183,23 @@ def parse_trace(path: Path) -> dict[str, Any]:
             if "lost" in line.lower():
                 lost.append({"line": line_number, "text": line})
             fields = line.split("\t")
-            if fields[0] == "EPT_SERVICE" and len(fields) == 9:
-                services.append(
-                    {
-                        "wall_s": float(fields[1]),
-                        "exit_nsecs": int(fields[2]),
-                        "entry_nsecs": int(fields[3]),
-                        "pid": int(fields[4]),
-                        "tid": int(fields[5]),
-                        "exit_cpu": int(fields[6]),
-                        "entry_cpu": int(fields[7]),
-                        "duration_ns": int(fields[8]),
-                    }
-                )
+            if fields[0] == "EPT_SERVICE" and len(fields) in (9, 11):
+                service = {
+                    "wall_s": float(fields[1]),
+                    "exit_nsecs": int(fields[2]),
+                    "entry_nsecs": int(fields[3]),
+                    "pid": int(fields[4]),
+                    "tid": int(fields[5]),
+                    "exit_cpu": int(fields[6]),
+                    "entry_cpu": int(fields[7]),
+                    "duration_ns": int(fields[8]),
+                    "fault_address": None,
+                    "error_code": None,
+                }
+                if len(fields) == 11:
+                    service["fault_address"] = int(fields[9])
+                    service["error_code"] = int(fields[10])
+                services.append(service)
             elif fields[0] in ("trace_status", "trace_window"):
                 continue
             elif line.startswith("Attaching "):
@@ -251,10 +258,132 @@ def service_stats(services: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def burst_stats(
+    services: list[dict[str, Any]], gate_begin_ns: int, gap_ns: int = 1_000_000
+) -> list[dict[str, Any]]:
+    bursts = []
+    current = []
+    for service in sorted(services, key=lambda row: row["exit_nsecs"]):
+        if current and service["exit_nsecs"] - current[-1]["exit_nsecs"] > gap_ns:
+            bursts.append(current)
+            current = []
+        current.append(service)
+    if current:
+        bursts.append(current)
+    return [
+        {
+            "count": len(burst),
+            "offset_from_gate_begin_ms": (
+                burst[0]["exit_nsecs"] - gate_begin_ns
+            )
+            / 1e6,
+            "span_ms": (burst[-1]["exit_nsecs"] - burst[0]["exit_nsecs"])
+            / 1e6,
+            "service_sum_ns": sum(row["duration_ns"] for row in burst),
+        }
+        for burst in bursts
+    ]
+
+
+def fault_attribution(
+    services: list[dict[str, Any]], guest: dict[str, Any], pre_fault: dict[str, Any]
+) -> dict[str, Any]:
+    if not services:
+        return {
+            "record_format": "empty",
+            "counts_by_range": {},
+            "unique_pages_by_range": {},
+            "error_code_counts": {},
+        }
+    addressed = [row for row in services if row["fault_address"] is not None]
+    if not addressed:
+        return {
+            "record_format": "legacy_without_address",
+            "counts_by_range": {},
+            "unique_pages_by_range": {},
+            "error_code_counts": {},
+        }
+    if len(addressed) != len(services):
+        raise SystemExit("trace mixes addressed and legacy EPT service records")
+
+    total_start = int(guest["sc_host_gpa"])
+    total_end = total_start + int(guest["sc_host_mem_size"])
+    private_start = int(pre_fault["gpa"], 16)
+    private_end = private_start + int(pre_fault["bytes"])
+    if not total_start <= private_start < private_end <= total_end:
+        raise SystemExit(
+            "invalid granted/private memory ranges: "
+            f"granted={total_start:#x}..{total_end:#x} "
+            f"private={private_start:#x}..{private_end:#x}"
+        )
+
+    ranges = (
+        ("shared_prefix", total_start, private_start),
+        ("private_prefault", private_start, private_end),
+        ("reserved_tail", private_end, total_end),
+    )
+    counts = {name: 0 for name, _, _ in ranges}
+    counts["outside_granted_memory"] = 0
+    pages = {name: set() for name in counts}
+    visibility_counts = {
+        "private": 0,
+        "shared_alias": 0,
+        "outside_granted_memory": 0,
+    }
+    shared_masks: dict[str, int] = {}
+    error_codes: dict[str, int] = {}
+    for service in addressed:
+        raw_address = service["fault_address"]
+        address = raw_address
+        visibility = "private"
+        if not total_start <= address < total_end:
+            aliases = [
+                (mask, raw_address & ~mask)
+                for mask in TDX_SHARED_GPA_MASK_CANDIDATES
+                if raw_address & mask
+                and total_start <= raw_address & ~mask < total_end
+            ]
+            if len(aliases) > 1:
+                raise SystemExit(
+                    f"ambiguous TDX shared GPA mask for address {raw_address:#x}"
+                )
+            if aliases:
+                mask, address = aliases[0]
+                visibility = "shared_alias"
+                mask_name = f"0x{mask:x}"
+                shared_masks[mask_name] = shared_masks.get(mask_name, 0) + 1
+            else:
+                visibility = "outside_granted_memory"
+        range_name = "outside_granted_memory"
+        for name, start, end in ranges:
+            if start <= address < end:
+                range_name = name
+                break
+        counts[range_name] += 1
+        visibility_counts[visibility] += 1
+        pages[range_name].add(address >> 12)
+        error_code = f"0x{service['error_code']:x}"
+        error_codes[error_code] = error_codes.get(error_code, 0) + 1
+
+    return {
+        "record_format": "addressed",
+        "granted_range": {"start": total_start, "end": total_end},
+        "private_prefault_range": {"start": private_start, "end": private_end},
+        "counts_by_range": counts,
+        "counts_by_visibility": visibility_counts,
+        "unique_pages_by_range": {
+            name: len(range_pages) for name, range_pages in pages.items()
+        },
+        "shared_alias_masks_observed": shared_masks,
+        "error_code_counts": error_codes,
+    }
+
+
 def render_markdown(result: dict[str, Any]) -> str:
     handler_upper_bound = result["handler_ept_service_upper_bound"]
     gated = result["gated_ept_service"]
     vm = result["vm_lifetime"]
+    attribution = result["gated_fault_attribution"]
     target = "PASS" if result["prefault_target_passed"] else "FAIL"
     return "\n".join(
         [
@@ -276,6 +405,23 @@ def render_markdown(result: dict[str, Any]) -> str:
             "",
             "Guest `time.time()` and host trace timestamps are separate clock domains and",
             "are intentionally not compared numerically.",
+            "",
+            "## Gated-fault attribution",
+            "",
+            f"- Trace record format: {attribution['record_format']}",
+            "- Counts by range: "
+            + json.dumps(attribution["counts_by_range"], sort_keys=True),
+            "- Unique 4 KiB pages by range: "
+            + json.dumps(attribution["unique_pages_by_range"], sort_keys=True),
+            "- Counts by TDX visibility: "
+            + json.dumps(attribution.get("counts_by_visibility", {}), sort_keys=True),
+            "- Shared alias masks: "
+            + json.dumps(
+                attribution.get("shared_alias_masks_observed", {}), sort_keys=True
+            ),
+            "- Error codes: "
+            + json.dumps(attribution["error_code_counts"], sort_keys=True),
+            f"- Burst counts: {[row['count'] for row in result['gated_bursts']]}",
             "",
             "## Guest telemetry",
             "",
@@ -346,6 +492,8 @@ def main() -> None:
             "t_pgfault_exec": guest["t_pgfault_exec"],
             "t_pgfault_exec_cycles": guest["t_pgfault_exec_cycles"],
             "sc_guest_tsc_hz": guest["sc_guest_tsc_hz"],
+            "sc_host_gpa": guest["sc_host_gpa"],
+            "sc_host_mem_size": guest["sc_host_mem_size"],
         },
         "pre_fault": markers["pre_fault"],
         "handler_interval": {
@@ -364,6 +512,10 @@ def main() -> None:
         },
         "handler_ept_service_upper_bound": service_stats(services),
         "gated_ept_service": service_stats(services),
+        "gated_bursts": burst_stats(services, signals["begin_monotonic_ns"]),
+        "gated_fault_attribution": fault_attribution(
+            services, guest, markers["pre_fault"]
+        ),
         "vm_lifetime": {
             "exit_count": sum(row["exit_count"] for row in per_pid.values()),
             "fault_count": vm_faults,
