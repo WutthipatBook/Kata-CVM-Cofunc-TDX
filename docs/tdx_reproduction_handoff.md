@@ -9199,3 +9199,47 @@ SHA-256:
 
 The next separately approved boundary is one traced Video launch. Do not run
 DNA automatically afterward.
+
+### CoFunc pre-fault Video EPT result
+
+The one-launch Video boundary completed at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_video_processing_20260721_151406`.
+The VM, workload, trace command, and postflight all succeeded. The original
+`run_rc=125` records only an obsolete offline-analysis failure caused by
+comparing guest `time.time()` values with host trace wall-clock values.
+
+The corrected analyzer relies on the authenticated source control flow:
+`begin` completes before `t_import_done`, and `end` begins after
+`t_func_done`. Thus every handler EPT service must be inside the authenticated
+gate even when guest and host clocks run at different apparent rates. The
+gate contained zero detailed EPT service records, giving a handler upper
+bound of zero and `prefault_target_passed=true`.
+
+This does not mean the VM had no EPT faults. The full lifecycle recorded
+1,615,435 exactly paired EPT exits, KVM page faults, and reentries across PIDs
+1059357, 1059669, and 1059787, totaling 38.289361746 seconds of paired
+service. These events occurred outside the authenticated handler gate during
+setup, pre-fault, or teardown. Guest telemetry reported 4,077,680 first-level
+execution faults, 1.061693552 seconds in the guest fault path, zero deferred
+accepts, and 211,812,352 bytes pre-faulted in 101 chunks.
+
+Both safety gates were ready; trace loss, prohibited KVM/TDX markers, and
+residue were zero; runtime source restoration hashes match exactly. The
+original harness result is preserved unchanged, and no VM was launched for
+the corrected offline analysis.
+
+Validation report:
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_video_processing_20260721_151406/offline_salvage_validation_report.md`
+(SHA-256
+`d2401ca3f53d90e3764c64d0b9be8bef28f87b8f0256310058c69160bcca8355`).
+
+Current analysis SHA-256:
+
+- `analyze_cofunc_ept_trace.py`: `644e1261b9f8a6a9272e0c8239346e0cc65b96753dc8a70cb48f29136c2f1431`
+- analyzer tests: `b1209f48b9b9bc208460d7115f26827dd7f5187c17ff3d340f3bc468bdaf43b5`
+- corrected JSON: `d9f307c76172a46f170c668c311d66d947b57081ddfba1c6ae5610fa60d7faf8`
+- corrected Markdown: `54085d5b47f45c598cccaebec12f7fffc83bad4e44e1276437c6c33239cd88e3`
+
+The Video pre-fault target is now proven. The next separately approved
+boundary is one traced `fn_py_dna_visualisation` launch. Do not launch DNA,
+measurements, or additional workloads automatically.

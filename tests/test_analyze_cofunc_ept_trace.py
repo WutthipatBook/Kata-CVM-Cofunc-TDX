@@ -39,7 +39,7 @@ class AnalyzeCoFuncEptTraceTest(unittest.TestCase):
             run_log.write_text(
                 "CoFunc private pre-fault: gpa=0x1000 bytes=4096 chunks=1 cycles=2\n"
                 "t_import_done 100.0\n"
-                "t_func_done 101.0\n",
+                "t_func_done 300.0\n",
                 encoding="utf-8",
             )
             service = (
@@ -66,7 +66,7 @@ class AnalyzeCoFuncEptTraceTest(unittest.TestCase):
             signals.write_text(
                 "wall_ns\tmonotonic_ns\tsample\tphase\n"
                 "99900000000\t1\t1\tbegin\n"
-                "101100000000\t2\t1\tend\n",
+                "110000000000\t10100000001\t1\tend\n",
                 encoding="ascii",
             )
             trace_result.write_text(
@@ -114,12 +114,19 @@ class AnalyzeCoFuncEptTraceTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(result["qemu_pids"], [101, 202])
         self.assertEqual(result["vm_lifetime"]["fault_count"], 12)
+        self.assertEqual(result["gated_ept_service"]["count"], 0)
+        self.assertEqual(result["handler_ept_service_upper_bound"]["count"], 0)
+        self.assertEqual(result["clock_domains"]["comparison"], "not_comparable")
+        self.assertEqual(result["clock_domains"]["guest_handler_duration_s"], 200.0)
+        self.assertEqual(result["clock_domains"]["host_signal_duration_s"], 10.1)
         self.assertTrue(result["prefault_target_passed"])
 
     def test_reports_nonzero_gated_event(self):
         completed, result = self.run_analyzer(gated_event=True)
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(result["handler_ept_service"]["count"], 1)
+        self.assertEqual(result["gated_ept_service"]["count"], 1)
+        self.assertEqual(result["handler_ept_service_upper_bound"]["count"], 1)
+        self.assertNotIn("handler_ept_service", result)
         self.assertFalse(result["prefault_target_passed"])
 
     def test_rejects_unpaired_lifecycle_per_pid(self):

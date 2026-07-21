@@ -120,11 +120,15 @@ def parse_signals(path: Path) -> dict[str, float]:
         raise SystemExit(f"expected exactly one ordered begin/end pair, got {rows}")
     if rows[1]["wall_ns"] <= rows[0]["wall_ns"]:
         raise SystemExit("non-positive signal window")
+    if rows[1]["monotonic_ns"] <= rows[0]["monotonic_ns"]:
+        raise SystemExit("non-positive monotonic signal window")
     return {
         "begin_wall_s": rows[0]["wall_ns"] / 1e9,
         "end_wall_s": rows[1]["wall_ns"] / 1e9,
         "begin_monotonic_ns": rows[0]["monotonic_ns"],
         "end_monotonic_ns": rows[1]["monotonic_ns"],
+        "duration_s": (rows[1]["monotonic_ns"] - rows[0]["monotonic_ns"])
+        / 1e9,
     }
 
 
@@ -248,7 +252,7 @@ def service_stats(services: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def render_markdown(result: dict[str, Any]) -> str:
-    handler = result["handler_ept_service"]
+    handler_upper_bound = result["handler_ept_service_upper_bound"]
     gated = result["gated_ept_service"]
     vm = result["vm_lifetime"]
     target = "PASS" if result["prefault_target_passed"] else "FAIL"
@@ -259,15 +263,19 @@ def render_markdown(result: dict[str, Any]) -> str:
             "## Result",
             "",
             f"- Pre-fault zero-handler-EPT target: **{target}**",
-            f"- Handler-window EPT violations: {handler['count']}",
             f"- Authenticated gated-window EPT violations: {gated['count']}",
-            f"- VM-lifetime EPT violations: {vm['fault_count']}",
+            f"- Handler EPT violation upper bound: {handler_upper_bound['count']}",
+            f"- VM-lifetime EPT faults: {vm['fault_count']}",
             f"- VM-lifetime paired service: {vm['service_sum_ns'] / 1e9:.9f} s",
             "- QEMU PIDs: " + ", ".join(map(str, result["qemu_pids"])),
             "",
-            "The authenticated signal window is a strict superset of the recorded",
-            "`t_import_done` to `t_func_done` handler interval. A zero gated count",
-            "therefore proves a zero handler count for this launch.",
+            "The instrumentation control flow opens the authenticated trace gate before",
+            "recording `t_import_done`, then closes it after recording `t_func_done`.",
+            "The gated count is therefore a conservative handler upper bound. A zero",
+            "gated count proves a zero handler count for this launch.",
+            "",
+            "Guest `time.time()` and host trace timestamps are separate clock domains and",
+            "are intentionally not compared numerically.",
             "",
             "## Guest telemetry",
             "",
@@ -284,7 +292,8 @@ def render_markdown(result: dict[str, Any]) -> str:
             "- Identical nonempty QEMU PID sets in all four aggregate maps",
             "- EPT exits, KVM page faults, and reentries paired per PID",
             "- No trace-loss or unparsed-output markers",
-            f"- Signal-only boundary EPT records: {result['signal_only_ept_count']}",
+            f"- Host authenticated-gate duration: {result['clock_domains']['host_signal_duration_s']:.9f} s",
+            f"- Guest handler duration: {result['clock_domains']['guest_handler_duration_s']:.9f} s",
             "",
         ]
     )
@@ -312,20 +321,8 @@ def main() -> None:
 
     handler_start = markers["t_import_done"]
     handler_end = markers["t_func_done"]
-    if not (
-        signals["begin_wall_s"] <= handler_start
-        < handler_end <= signals["end_wall_s"]
-    ):
-        raise SystemExit(
-            "authenticated signal window does not contain the handler interval: "
-            f"signal={signals['begin_wall_s']:.9f}..{signals['end_wall_s']:.9f} "
-            f"handler={handler_start:.9f}..{handler_end:.9f}"
-        )
-    handler_services = [
-        service
-        for service in services
-        if handler_start <= service["wall_s"] <= handler_end
-    ]
+    guest_handler_duration = handler_end - handler_start
+    host_signal_duration = signals["duration_s"]
     qemu_pids = trace["qemu_pids"]
     aggregates = trace["aggregates"]
     per_pid = {
@@ -351,11 +348,22 @@ def main() -> None:
             "sc_guest_tsc_hz": guest["sc_guest_tsc_hz"],
         },
         "pre_fault": markers["pre_fault"],
-        "handler_interval": {"start": handler_start, "end": handler_end},
+        "handler_interval": {
+            "clock_domain": "guest_wall",
+            "start": handler_start,
+            "end": handler_end,
+        },
         "signal_window": signals,
-        "handler_ept_service": service_stats(handler_services),
+        "clock_domains": {
+            "comparison": "not_comparable",
+            "guest_handler_duration_s": guest_handler_duration,
+            "host_signal_duration_s": host_signal_duration,
+            "guest_to_host_duration_ratio": guest_handler_duration
+            / host_signal_duration,
+            "enclosure_basis": "authenticated_instrumentation_control_flow",
+        },
+        "handler_ept_service_upper_bound": service_stats(services),
         "gated_ept_service": service_stats(services),
-        "signal_only_ept_count": len(services) - len(handler_services),
         "vm_lifetime": {
             "exit_count": sum(row["exit_count"] for row in per_pid.values()),
             "fault_count": vm_faults,

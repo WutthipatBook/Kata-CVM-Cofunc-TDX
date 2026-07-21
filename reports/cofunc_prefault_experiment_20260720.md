@@ -567,3 +567,48 @@ unpaired per-PID lifecycle. The relevant SHA-256 values are:
 
 The next permitted runtime boundary is one traced Video launch. DNA remains a
 separate decision after reviewing Video and the postflight safety evidence.
+
+## Video handler EPT result and clock-domain correction
+
+The traced Video launch at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_video_processing_20260721_151406`
+completed successfully. Its original top-level `run_rc=125` was an offline
+analyzer defect, not a VM or workload failure: the analyzer numerically
+compared guest `time.time()` markers with host trace wall-clock timestamps.
+The guest interval was 51.962042093 seconds while the host authenticated gate
+was 18.560152135 seconds, confirming that these clock domains cannot be
+cross-compared.
+
+The authenticated instrumentation order is conclusive without clock
+synchronization: `begin` completes before `t_import_done`, and `end` starts
+after `t_func_done`. Corrected offline analysis therefore treats all gated
+records as a conservative handler upper bound. The gate contained zero EPT
+service records, so the Video handler had exactly zero host EPT/SEPT service
+in this launch and `prefault_target_passed=true`.
+
+The VM lifetime still recorded 1,615,435 exactly paired EPT exits, KVM page
+faults, and reentries across three lifecycle PIDs, totaling 38.289361746
+seconds of service. Those events belong to setup, pre-fault, and teardown;
+they are not handler events. Guest telemetry recorded 4,077,680 first-level
+execution faults, 1.061693552 seconds in the first-level fault path, zero
+deferred accepts, and complete 211,812,352-byte pre-fault coverage in 101
+chunks.
+
+Preflight and postflight safety gates were ready, trace loss and prohibited
+KVM/TDX markers were zero, and all patched runtime sources were restored to
+their exact pre-run SHA-256 values. No VM was launched during salvage. The
+validation report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_video_processing_20260721_151406/offline_salvage_validation_report.md`
+(SHA-256
+`d2401ca3f53d90e3764c64d0b9be8bef28f87b8f0256310058c69160bcca8355`).
+
+Updated SHA-256:
+
+- Analyzer: `644e1261b9f8a6a9272e0c8239346e0cc65b96753dc8a70cb48f29136c2f1431`
+- Analyzer tests: `b1209f48b9b9bc208460d7115f26827dd7f5187c17ff3d340f3bc468bdaf43b5`
+- Corrected JSON: `d9f307c76172a46f170c668c311d66d947b57081ddfba1c6ae5610fa60d7faf8`
+- Corrected report: `54085d5b47f45c598cccaebec12f7fffc83bad4e44e1276437c6c33239cd88e3`
+
+Video now conclusively matches Kata's zero-handler-EPT result under CoFunc
+pre-faulting. The next separately approved runtime boundary is one traced DNA
+launch; do not run additional workloads or samples automatically.
