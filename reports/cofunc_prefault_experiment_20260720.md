@@ -265,3 +265,10 @@ the missing DNA NumPy pin, matching the established dependency-fix patch and
 the preserved successful image. Rebuild and image verification are required
 before considering one further DNA launch. The current failed run must not be
 aggregated.
+
+The runtime runner now enforces that verification before launching a DNA VM.
+After rebuilding the diagnostic base and final images, it requires both a
+`numpy==1.26.4` base-history record and a successful NumPy 1.26.4 import from
+the final image. It preserves the history, import output, and full image
+metadata in the run backup. Any mismatch stops before the lower-level VM
+runner is called.

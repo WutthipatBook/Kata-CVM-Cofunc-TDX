@@ -144,6 +144,27 @@ rebuild_workload_image() {
 	fi
 }
 
+verify_workload_image() {
+	local workload=$1
+	local image=$2
+	local base_image="${image}_base"
+
+	[[ $workload == "fn_py_dna_visualisation" ]] || return 0
+
+	log "verifying pinned DNA Python dependencies before any VM launch"
+	docker image history --no-trunc "$base_image:latest" \
+		>"$BACKUP_DIR/$image.base.history"
+	rg -Fq 'numpy==1.26.4' "$BACKUP_DIR/$image.base.history" \
+		|| die "$base_image:latest history does not contain numpy==1.26.4"
+	if ! docker run --rm --entrypoint /usr/local/bin/python "$image:latest" \
+		-c 'import numpy; print("numpy=" + numpy.__version__); assert numpy.__version__ == "1.26.4"' \
+		| tee "$BACKUP_DIR/$image.python-dependencies"; then
+		die "$image:latest does not import the required NumPy 1.26.4"
+	fi
+	docker image inspect "$base_image:latest" "$image:latest" \
+		>"$BACKUP_DIR/$image.verified-images.json"
+}
+
 cleanup() {
 	local rc=$?
 	local workload dir image
@@ -328,6 +349,7 @@ main() {
 			docker run --rm "$image:latest" sh -c 'grep -R -q "sc_guest_n_accept_before" /func' \
 				|| die "rebuilt $image image does not contain guest stat template instrumentation"
 		fi
+		verify_workload_image "$workload" "$image"
 			docker image inspect "$image:latest" --format '{{.Id}} {{.Created}}' \
 				>"$BACKUP_DIR/$image.diagnostic"
 		done
