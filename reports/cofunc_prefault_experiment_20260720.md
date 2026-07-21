@@ -562,7 +562,7 @@ unpaired per-PID lifecycle. The relevant SHA-256 values are:
 
 - Patch 0015: `d266a0d3cadae9e5bdde5f03c645da77057241261b994eafbf9bd9ae9c53daf3`
 - Analyzer: `3cf48effdd6831b895da2b2c0c1aa93fc5c4252cd4133b3a2527d36883f2c941`
-- Pilot harness: `222926e49c9ff60d02db357008d7e99837da4155a1e6e5ac0b5430dcc8ddad21`
+- Pilot harness: `96e07787882f2a1f56e8110f4493cdeda94cd9ad455b4c81ff4d836efb3bd936`
 - Analyzer tests: `b0c308a3201f3aa76f57d9d2aa93fdd5154ada1aad8887b529be8c21d1cc7789`
 
 The next permitted runtime boundary is one traced Video launch. DNA remains a

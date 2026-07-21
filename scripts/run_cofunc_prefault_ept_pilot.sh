@@ -70,12 +70,15 @@ capture_host_state() {
 		>"$RUN_ROOT/processes-$label.txt"
 }
 
-check_helpers() {
-	curl --connect-timeout 5 --max-time 15 -fsS -X POST \
-		http://127.0.0.1:8888/get_param \
-		--data-urlencode "fn_name=testcases/$WORKLOAD" >/dev/null
-	curl --connect-timeout 5 --max-time 15 -fsS \
-		http://127.0.0.1:9000/minio/health/ready >/dev/null
+check_helper_inputs() {
+	local image
+	[[ -r $ROOT/cofunc-artifact-oldabi/testcases/testcases/$WORKLOAD/param.json ]] \
+		|| fail "missing workload parameter file: $WORKLOAD"
+	for image in scenv_param:latest minio/minio:latest scenv_file_server:latest \
+		scenv_device:latest couchdb:latest; do
+		sudo -n docker image inspect "$image" >/dev/null 2>&1 \
+			|| fail "missing local helper image: $image"
+	done
 }
 
 verify_source_restoration() {
@@ -146,7 +149,7 @@ fn_py_video_processing|fn_py_dna_visualisation) ;;
 	exit 2
 	;;
 esac
-for command in cmp curl diff jq ps rg sed sha256sum sudo; do
+for command in cmp diff docker jq ps rg sed sha256sum sudo; do
 	need "$command"
 done
 for executable in "$TRACE_WRAPPER" "$ANALYZER" "$GATE" "$RUNNER"; do
@@ -174,7 +177,7 @@ sha256sum "$0" "$TRACE_WRAPPER" "$ANALYZER" "$RUNNER" \
 	>"$RUN_ROOT/experiment-inputs.sha256"
 
 sudo -n "$GATE" pre-cofunc-prefault-ept-pilot | tee "$RUN_ROOT/preflight.log"
-check_helpers
+check_helper_inputs
 capture_host_state before
 capture_dmesg before
 
