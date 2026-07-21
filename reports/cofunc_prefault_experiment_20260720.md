@@ -346,3 +346,8 @@ The detailed video validation report is
 `/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_chunked_video_20260721_063648/validation_report.md`
 (SHA-256
 `49c69b8e46ddd9a661c38d2ca3227ef3ccef73139f7791575cba130e592d15c5`).
+
+The pre-launch Python workload guard now also inspects the rebuilt final image
+and requires `/func/main.py` to contain the 64-bit ctypes syscall return
+declaration. This makes a stale cached template a pre-VM failure rather than
+another invalid timing run.

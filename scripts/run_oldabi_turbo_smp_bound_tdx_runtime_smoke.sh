@@ -175,6 +175,11 @@ verify_workload_image() {
 		| tee "$BACKUP_DIR/$image.python-dependencies"; then
 		die "$image:latest failed its pre-launch Python dependency check"
 	fi
+	if ! docker run --rm "$image:latest" \
+		grep -nF 'libc.syscall.restype = ctypes.c_long' /func/main.py \
+		| tee "$BACKUP_DIR/$image.syscall-restype"; then
+		die "$image:latest does not contain the 64-bit Python syscall return declaration"
+	fi
 	docker image inspect "$base_image:latest" "$image:latest" \
 		>"$BACKUP_DIR/$image.verified-images.json"
 }
