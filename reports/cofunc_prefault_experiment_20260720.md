@@ -351,3 +351,31 @@ The pre-launch Python workload guard now also inspects the rebuilt final image
 and requires `/func/main.py` to contain the 64-bit ctypes syscall return
 declaration. This makes a stale cached template a pre-VM failure rather than
 another invalid timing run.
+
+## First 64-bit counter pilot and workload-global collision
+
+The first attempted 64-bit video counter pilot completed functionally at:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_video_64bit_counter_20260721_070038`
+
+It returned zero and the postflight gate was ready. One marker pre-faulted
+211,812,352 bytes in 101 chunks, both accept deltas were zero, and no host stop
+marker occurred. However, the raw after-execution page-fault value was still
+negative (`-1170137668`), so the timing validation failed.
+
+The configured `c_long` declaration was present in the final image. The
+remaining truncation came from the workload's `execute.py`, which runs in the
+template's global namespace and assigns a new `libc = ctypes.CDLL(None)`.
+This replaces the object before the after-execution stat reads.
+
+Patch 0012 fixes the namespace collision by retaining a private
+`_cofunc_syscall` function handle and using it for every template-owned
+syscall. The orchestration runner now applies 0012 after 0007 and refuses to
+launch unless the rebuilt final image proves both the private 64-bit binding
+and its use for `t_pgfault_after_exec`. Sequential patch application and shell
+syntax checks pass. No VM has run with patch 0012 yet.
+
+The detailed failed-counter validation report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_video_64bit_counter_20260721_070038/validation_report.md`
+(SHA-256
+`800b567ca28f4eea4fd8c777478510db56c86b107a358d17986e9d8ddd43d967`).

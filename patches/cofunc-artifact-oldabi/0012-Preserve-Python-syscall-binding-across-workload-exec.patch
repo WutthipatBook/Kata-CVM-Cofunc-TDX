@@ -1,0 +1,66 @@
+From: CoFunc TDX artifact reproduction <noreply@example.com>
+Date: Tue, 21 Jul 2026 07:25:00 +0000
+Subject: [PATCH] runtime: preserve Python syscall binding across workload exec
+
+Python workloads are executed in the template's global namespace.  Some,
+including video processing, assign a new libc object and thereby discard the
+ctypes return type configured by the instrumentation template.  Keep a
+private syscall function handle and use it for all template-owned calls so
+64-bit statistics cannot be truncated by workload globals.
+---
+ testcases/tools/template.py | 43 ++++++++++++++++++++++---------------------
+ 1 file changed, 22 insertions(+), 21 deletions(-)
+
+diff --git a/testcases/tools/template.py b/testcases/tools/template.py
+index d9d3e52..fd4e549 100644
+--- a/testcases/tools/template.py
++++ b/testcases/tools/template.py
+@@ -4 +4,2 @@ libc = ctypes.CDLL(None)
+-libc.syscall.restype = ctypes.c_long
++_cofunc_syscall = libc.syscall
++_cofunc_syscall.restype = ctypes.c_long
+@@ -57 +58 @@ elif sys.argv[1] == "--sc-snapshot":
+-    libc.syscall(SYS_SC_SNAPSHOT)
++    _cofunc_syscall(SYS_SC_SNAPSHOT)
+@@ -78 +79 @@ with open("/func/execute.py") as file:
+-t_attest_after_import = libc.syscall(SYS_SC_GET_STAT, STAT_T_ATTEST)
++t_attest_after_import = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_ATTEST)
+@@ -82,9 +83,9 @@ t_network = 0
+-# libc.syscall(SYS_SC_PRINT_STAT, b"import_done\0")
+-
+-# libc.syscall(SYS_SC_DEFER_ENCRYPT, 1)
+-n_hcalls_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_N_HCALLS)
+-t_encrypt_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_ENCRYPT)
+-t_grant_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_GRANT)
+-t_delegate_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_DELEGATE)
+-n_accept_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_N_ACCEPT)
+-t_pgfault_before_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_PGFAULT)
++# _cofunc_syscall(SYS_SC_PRINT_STAT, b"import_done\0")
++
++# _cofunc_syscall(SYS_SC_DEFER_ENCRYPT, 1)
++n_hcalls_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_HCALLS)
++t_encrypt_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_ENCRYPT)
++t_grant_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_GRANT)
++t_delegate_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_DELEGATE)
++n_accept_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_ACCEPT)
++t_pgfault_before_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_PGFAULT)
+@@ -95,8 +96,8 @@ set_retval(fn_name, retval)
+-n_hcalls_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_N_HCALLS)
+-t_encrypt_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_ENCRYPT)
+-t_grant_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_GRANT)
+-t_delegate_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_DELEGATE)
+-n_cow = libc.syscall(SYS_SC_GET_STAT, STAT_N_COWS)
+-n_accept_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_N_ACCEPT)
+-t_pgfault_after_exec = libc.syscall(SYS_SC_GET_STAT, STAT_T_PGFAULT)
+-# libc.syscall(SYS_SC_DEFER_ENCRYPT, 0)
++n_hcalls_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_HCALLS)
++t_encrypt_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_ENCRYPT)
++t_grant_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_GRANT)
++t_delegate_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_DELEGATE)
++n_cow = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_COWS)
++n_accept_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_ACCEPT)
++t_pgfault_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_PGFAULT)
++# _cofunc_syscall(SYS_SC_DEFER_ENCRYPT, 0)
+@@ -106 +107 @@ t_func_done = time.time()
+-# libc.syscall(SYS_SC_PRINT_STAT, b"func_done\0")
++# _cofunc_syscall(SYS_SC_PRINT_STAT, b"func_done\0")

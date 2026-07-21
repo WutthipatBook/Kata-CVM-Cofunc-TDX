@@ -8,6 +8,7 @@ SHADOW_DIR="$ARTIFACT/shadow_container"
 RUNTIME_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0003-Use-TDX-shadow-runtime-config-diagnostic.patch"
 HUGEPAGE_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0004-Enable-hugepage-setup-for-old-ABI-run-sc-fork.patch"
 RUNTIME_EXTRA_PATCH="${COFUNC_OLDABI_RUNTIME_EXTRA_PATCH:-}"
+RUNTIME_FOLLOWUP_PATCH="${COFUNC_OLDABI_RUNTIME_FOLLOWUP_PATCH:-}"
 CPU_SMOKE="$BUNDLE/scripts/run_oldabi_turbo_msr_skip_cpu_bound_smoke.sh"
 DEFAULT_WORKLOAD="fn_py_face_detection"
 TOOLS="$ARTIFACT/testcases/tools"
@@ -175,10 +176,11 @@ verify_workload_image() {
 		| tee "$BACKUP_DIR/$image.python-dependencies"; then
 		die "$image:latest failed its pre-launch Python dependency check"
 	fi
-	if ! docker run --rm "$image:latest" \
-		grep -nF 'libc.syscall.restype = ctypes.c_long' /func/main.py \
+	if ! docker run --rm "$image:latest" sh -c \
+		"grep -nF '_cofunc_syscall.restype = ctypes.c_long' /func/main.py && \
+		 grep -nF 't_pgfault_after_exec = _cofunc_syscall(' /func/main.py" \
 		| tee "$BACKUP_DIR/$image.syscall-restype"; then
-		die "$image:latest does not contain the 64-bit Python syscall return declaration"
+		die "$image:latest does not preserve the 64-bit syscall binding across workload exec"
 	fi
 	docker image inspect "$base_image:latest" "$image:latest" \
 		>"$BACKUP_DIR/$image.verified-images.json"
@@ -233,6 +235,10 @@ main() {
 	[[ -f "$HUGEPAGE_PATCH" ]] || die "missing patch: $HUGEPAGE_PATCH"
 	if [[ -n $RUNTIME_EXTRA_PATCH ]]; then
 		[[ -f "$RUNTIME_EXTRA_PATCH" ]] || die "missing extra runtime patch: $RUNTIME_EXTRA_PATCH"
+	fi
+	if [[ -n $RUNTIME_FOLLOWUP_PATCH ]]; then
+		[[ -n $RUNTIME_EXTRA_PATCH ]] || die "runtime follow-up patch requires an extra runtime patch"
+		[[ -f "$RUNTIME_FOLLOWUP_PATCH" ]] || die "missing runtime follow-up patch: $RUNTIME_FOLLOWUP_PATCH"
 	fi
 	[[ -x "$CPU_SMOKE" ]] || die "missing smoke helper: $CPU_SMOKE"
 	[[ -f "$ACTION_SH" ]] || die "missing run_sc_fork action: $ACTION_SH"
@@ -300,6 +306,7 @@ main() {
 	fi
 	{
 		printf 'cofunc_oldabi_runtime_extra_patch=%s\n' "$RUNTIME_EXTRA_PATCH"
+		printf 'cofunc_oldabi_runtime_followup_patch=%s\n' "$RUNTIME_FOLLOWUP_PATCH"
 		printf 'cofunc_oldabi_skip_face_smoke=%s\n' "$SKIP_FACE_SMOKE_VALUE"
 		printf 'cofunc_oldabi_regular_memfile=%s\n' "${COFUNC_OLDABI_REGULAR_MEMFILE:-0}"
 		printf 'docker_build_cache_args=%s\n' "${DOCKER_BUILD_CACHE_ARGS[*]}"
@@ -326,6 +333,14 @@ main() {
 				|| die "runtime extra patch did not add Python raw guest stat markers"
 			rg -q 'sc_guest_n_accept_before' "$TEMPLATE_JS" \
 				|| die "runtime extra patch did not add JS raw guest stat markers"
+			if [[ -n $RUNTIME_FOLLOWUP_PATCH ]]; then
+				log "applying runtime instrumentation follow-up patch: $RUNTIME_FOLLOWUP_PATCH"
+				patch -d "$ARTIFACT" -p1 -i "$RUNTIME_FOLLOWUP_PATCH"
+				rg -q '_cofunc_syscall.restype = ctypes.c_long' "$TEMPLATE_PY" \
+					|| die "runtime follow-up patch did not add the private 64-bit syscall binding"
+				rg -q 't_pgfault_after_exec = _cofunc_syscall' "$TEMPLATE_PY" \
+					|| die "runtime follow-up patch did not preserve the post-exec syscall binding"
+			fi
 		fi
 	sha256sum "$CONFIG_H" "$SHADOW_MAIN_C" "$ACTION_SH" "$LEAN_START_SH" "$TEMPLATE_PY" "$TEMPLATE_JS" "$ANALYZE_PY" \
 		>"$BACKUP_DIR/sha256.diagnostic"

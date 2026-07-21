@@ -6,6 +6,7 @@ BUNDLE="${BUNDLE:-/home/booklyn/cofunc-tdx}"
 RUNNER="$BUNDLE/scripts/run_oldabi_turbo_smp_bound_tdx_runtime_instrumented.sh"
 CVM_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0006-Diagnostic-expose-guest-accept-pgfault-stats.patch"
 RUNTIME_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0007-Diagnostic-emit-grant-accept-runtime-metrics.patch"
+RUNTIME_FOLLOWUP_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0012-Preserve-Python-syscall-binding-across-workload-exec.patch"
 THP_ENABLED="/sys/kernel/mm/transparent_hugepage/enabled"
 STAMP="$(date -u +%Y%m%d_%H%M%S)"
 OUT="${OUT:-$ROOT/results/oldabi_5_19_turbo_smp_bound_tdx_runtime_instrumented_thp_never_$STAMP}"
@@ -28,6 +29,7 @@ main() {
 	[[ -x "$RUNNER" ]] || die "missing instrumented runner: $RUNNER"
 	[[ -f "$CVM_PATCH" ]] || die "missing CVM instrumentation patch: $CVM_PATCH"
 	[[ -f "$RUNTIME_PATCH" ]] || die "missing runtime instrumentation patch: $RUNTIME_PATCH"
+	[[ -f "$RUNTIME_FOLLOWUP_PATCH" ]] || die "missing runtime instrumentation follow-up patch: $RUNTIME_FOLLOWUP_PATCH"
 	[[ -w "$THP_ENABLED" ]] || die "cannot write $THP_ENABLED"
 
 	local before restore_mode cleanup_done=0
@@ -72,6 +74,7 @@ main() {
 	export OUT
 	export COFUNC_OLDABI_CVM_EXTRA_PATCH="$CVM_PATCH"
 	export COFUNC_OLDABI_RUNTIME_EXTRA_PATCH="$RUNTIME_PATCH"
+	export COFUNC_OLDABI_RUNTIME_FOLLOWUP_PATCH="$RUNTIME_FOLLOWUP_PATCH"
 	set +e
 	"$RUNNER" "$@"
 	local rc=$?
