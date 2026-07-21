@@ -9090,6 +9090,13 @@ adds the atomic kernel count and cycle accumulation; patch 0006 exposes count
 and `cur_freq`; patch 0014 emits count, cycles, and calibrated seconds. The
 full sequence applies cleanly to a fresh source clone, the Python files
 compile, and a synthetic analyzer fixture gives the expected 2.8 GHz
-conversion. The active old-ABI source still needs patch 0013 plus a baseline
-kernel ISO rebuild. After that, the next boundary is one isolated video smoke,
-not DNA/video sampling.
+conversion.
+
+Patch 0013 is applied as old-ABI source commit `1242aa3`. The rebuilt
+`kernel.img` SHA-256 is
+`056a5924a71b97717004c8b1fc52018a5bb45af9e29e94b5b561b8ea2762a6cb`;
+both `chcore.iso` copies are identical with SHA-256
+`9a2267022e1cd4d8c8c1ded854ef3b4c85a8c1fb55a7b8f106d411955b42e3e1`.
+The source markers, artifact timestamps, and embedded format marker all
+verify. The next boundary is one isolated video telemetry smoke, not
+DNA/video sampling.

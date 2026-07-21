@@ -425,8 +425,8 @@ Detailed validation:
 
 ## Prepared fault-count and calibrated-time instrumentation
 
-No further VM has been launched. The next bounded phase is implemented but
-not yet applied to the active old-ABI source:
+No further VM has been launched. The next bounded phase is implemented and
+the persistent kernel portion is now applied to the active old-ABI source:
 
 - Patch 0013 adds an atomic per-cap-group first-level page-fault count and
   makes the existing cumulative cycle update atomic.
@@ -443,6 +443,14 @@ The complete patch sequence was applied to a fresh source clone and both
 Python files passed `py_compile`. A synthetic 2.8 GHz analyzer fixture emitted
 `n_pgfault_exec=4056821`, `t_pgfault_exec_cycles=3095835376`, and
 `t_pgfault_exec=1.1056554914285714`. This validates plumbing and arithmetic,
-not guest behavior. One isolated pre-fault video smoke is the next permitted
-runtime boundary after separately applying patch 0013 and rebuilding the
-baseline kernel ISO.
+not guest behavior.
+
+Patch 0013 was subsequently applied and committed as old-ABI source commit
+`1242aa3`. The rebuilt `kernel.img` SHA-256 is
+`056a5924a71b97717004c8b1fc52018a5bb45af9e29e94b5b561b8ea2762a6cb`.
+The kernel-build and runtime copies of `chcore.iso` are byte-identical with
+SHA-256
+`9a2267022e1cd4d8c8c1ded854ef3b4c85a8c1fb55a7b8f106d411955b42e3e1`.
+Both are newer than all four changed sources, and all three artifacts contain
+the `n_pgfault` format marker. One isolated pre-fault video telemetry smoke is
+now the next permitted runtime boundary.
