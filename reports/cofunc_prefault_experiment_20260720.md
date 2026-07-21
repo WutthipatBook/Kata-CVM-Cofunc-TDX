@@ -454,3 +454,34 @@ SHA-256
 Both are newer than all four changed sources, and all three artifacts contain
 the `n_pgfault` format marker. One isolated pre-fault video telemetry smoke is
 now the next permitted runtime boundary.
+
+## Video fault-telemetry result
+
+The isolated Video run passed on one launch with ready pre/post safety gates:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_video_fault_telemetry_20260721_095235`
+
+It recorded 4,080,876 first-level execution faults, 3,221,283,012 fault-path
+cycles, and a guest-calibrated TSC frequency of 2,800,756,372 Hz. This gives
+1.150147526 seconds in `do_page_fault`, 281.838391 ns per fault, and 1.983050%
+of the 57.998925686-second handler execution interval. Of those faults, 3,431
+were CoW faults (0.084075%). The pre-fault operation covered exactly 101 2 MiB
+chunks and took 0.884459478 seconds. Both import and execution reported zero
+deferred accepts.
+
+The first-level fault count is close to the earlier three-sample means: it is
+0.506010% above Native (4,060,330.333) and 0.592960% above Kata
+(4,056,820.667). This supports the conclusion that first-level Video fault
+frequency is essentially the same across the three systems. The run had zero
+private 2 MiB promotions, private level-2 mappings, KVM/TDX stop markers,
+kernel-log loss, or residual Kata/QEMU objects.
+
+This is one diagnostic sample, not a performance aggregation. It does not
+measure Native/Linux fault-handler service time, and it did not independently
+trace host-side CoFunc SEPT/EPT service. The CoFunc timing interval surrounds
+`do_page_fault`, so VM exits inside that function are included in its measured
+cycles. The validation report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_video_fault_telemetry_20260721_095235/validation_report.md`
+(SHA-256
+`07957a510fa69a191ba7943178cec15223aecec3af112c83afc183eeeab84e8f`).
+The next bounded runtime step is one isolated DNA telemetry smoke.

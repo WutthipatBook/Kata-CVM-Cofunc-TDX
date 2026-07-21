@@ -9100,3 +9100,28 @@ both `chcore.iso` copies are identical with SHA-256
 The source markers, artifact timestamps, and embedded format marker all
 verify. The next boundary is one isolated video telemetry smoke, not
 DNA/video sampling.
+
+### CoFunc pre-fault Video fault telemetry
+
+The isolated run at
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_video_fault_telemetry_20260721_095235`
+passed on one launch with ready pre/post safety gates. It measured 4,080,876
+first-level execution faults and 3,221,283,012 cycles at a guest-reported
+2,800,756,372 Hz: 1.150147526 seconds total, 281.838391 ns per fault, and
+1.983050% of handler execution. The run reported 3,431 CoW faults and zero
+deferred accepts.
+
+The count is within 0.506010% of the earlier Native Video mean and 0.592960%
+of the Kata Video mean. There were zero private level-2 mappings, private 2 MiB
+promotions, KVM/TDX stop markers, kernel-log loss, or residual Kata/QEMU
+objects. This result establishes comparable first-level fault frequency and a
+calibrated CoFunc `do_page_fault` interval. It does not yet provide a
+Native/Linux per-fault service-time measurement or an independent host-side
+CoFunc SEPT/EPT trace.
+
+The detailed report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_video_fault_telemetry_20260721_095235/validation_report.md`
+(SHA-256
+`07957a510fa69a191ba7943178cec15223aecec3af112c83afc183eeeab84e8f`).
+The next bounded boundary is one isolated DNA telemetry smoke, not a
+multi-sample run.
