@@ -1,0 +1,122 @@
+From: CoFunc TDX artifact reproduction <noreply@example.com>
+Date: Tue, 21 Jul 2026 11:00:00 +0000
+Subject: [PATCH] runtime: signal CoFunc handler EPT trace window
+
+Pass an authenticated host trace URL through the split-container rootfs and
+signal immediately around handler execution. This patch is diagnostic-only
+and requires COFUNC_EPT_TRACE_URL at runtime.
+---
+ testcases/tools/lean_container/start.sh       | 20 ++++++++++++++++++++
+ testcases/tools/tasks/run_sc_fork/action.sh   |  1 +
+ testcases/tools/template.py                   | 15 +++++++++++++++
+ 3 files changed, 36 insertions(+)
+
+diff --git a/testcases/tools/lean_container/start.sh b/testcases/tools/lean_container/start.sh
+--- a/testcases/tools/lean_container/start.sh
++++ b/testcases/tools/lean_container/start.sh
+@@ -16,6 +16,7 @@ tools=$(dirname $0)/..
+ mem_file="/dev/hugepages/split_container/${fn_name}_1"
+ regular_memfile="${COFUNC_OLDABI_REGULAR_MEMFILE:-0}"
+ regular_memfile_host=""
++trace_url="${COFUNC_EPT_TRACE_URL:-}"
+ 
+ cleanup_regular_memfile() {
+         if [[ -n ${regular_memfile_host:-} ]]; then
+@@ -23,6 +24,12 @@ cleanup_regular_memfile() {
+         fi
+ }
+ 
++trace_url_host=""
++cleanup_trace_url() {
++        if [[ -n ${trace_url_host:-} ]]; then
++                rm -f "$trace_url_host"
++        fi
++}
+ 
+ # if [[ "$fn_name" =~ "_py_" ]]; then
+ #         cpu_param="--cpuset-cpus 0"
+@@ -39,6 +46,11 @@ if [[ $regular_memfile != 0 && $regular_memfile != 1 ]]; then
+         exit 1
+ fi
+ 
++if [[ -z $trace_url || $trace_url == *$'\n'* || $trace_url == *$'\r'* ]]; then
++        echo "COFUNC_EPT_TRACE_URL must be one non-empty line"
++        exit 1
++fi
++
+ if [[ $regular_memfile == 1 ]]; then
+         mem_file="/tmp/split_container/${fn_name}_1"
+ fi
+@@ -67,6 +79,14 @@ if [[ $regular_memfile == 1 ]]; then
+         trap cleanup_regular_memfile EXIT
+ fi
+ 
++trace_url_host=".rootfs/$name/tmp/cofunc-ept-trace-url"
++if [[ ! -d $(dirname "$trace_url_host") ]]; then
++        echo "missing split-container tmp directory: $(dirname "$trace_url_host")"
++        exit 1
++fi
++printf '%s\n' "$trace_url" >"$trace_url_host"
++trap 'cleanup_trace_url; cleanup_regular_memfile' EXIT
++
+ # if [[ $result_log != "" ]]; then
+ #         echo "new test @ $(date)" >> $result_log
+ # fi
+diff --git a/testcases/tools/tasks/run_sc_fork/action.sh b/testcases/tools/tasks/run_sc_fork/action.sh
+--- a/testcases/tools/tasks/run_sc_fork/action.sh
++++ b/testcases/tools/tasks/run_sc_fork/action.sh
+@@ -47,5 +47,6 @@ $tools/sc-snapshot.sh
+ 
+ sudo env COFUNC_OLDABI_REGULAR_MEMFILE="${COFUNC_OLDABI_REGULAR_MEMFILE:-0}" \
++        COFUNC_EPT_TRACE_URL="${COFUNC_EPT_TRACE_URL:-}" \
+         $tools/lean_container/start.sh sc-fork $log_file $times
+ 
+ trap - EXIT
+diff --git a/testcases/tools/template.py b/testcases/tools/template.py
+--- a/testcases/tools/template.py
++++ b/testcases/tools/template.py
+@@ -4,6 +4,7 @@ libc = ctypes.CDLL(None)
+ _cofunc_syscall = libc.syscall
+ _cofunc_syscall.restype = ctypes.c_long
+ sys.dont_write_bytecode = True
++EPT_TRACE_URL_PATH = "/tmp/cofunc-ept-trace-url"
+ 
+ SYS_SC_SNAPSHOT       = 0x1000
+ SYS_SC_PRINT_STAT     = 0x1001
+@@ -22,6 +23,18 @@ STAT_N_PGFAULT  = 0x9
+ STAT_TSC_HZ     = 0xa
+ 
+ 
++def fault_trace_signal(phase):
++    with open(EPT_TRACE_URL_PATH, encoding="ascii") as file:
++        base_url = file.read().strip()
++    if not base_url or "\n" in base_url or "\r" in base_url:
++        raise RuntimeError("invalid CoFunc EPT trace URL")
++    with urllib.request.urlopen(f"{base_url}/{phase}", timeout=30) as response:
++        if response.status != 204:
++            raise RuntimeError(
++                f"CoFunc EPT trace signal {phase} returned HTTP {response.status}"
++            )
++
++
+ def get_param(fn_name):
+     data = urllib.parse.urlencode({"fn_name": fn_name})
+     data = data.encode('ascii')
+@@ -77,6 +90,7 @@ with open("/func/execute.py") as file:
+     fn_code = file.read()
+ 
+ t_attest_after_import = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_ATTEST)
++fault_trace_signal("begin")
+ t_import_done = time.time()
+ 
+ t_network = 0
+@@ -108,6 +122,7 @@ n_pgfault_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_PGFAULT)
+ # _cofunc_syscall(SYS_SC_DEFER_ENCRYPT, 0)
+ 
+ t_func_done = time.time()
++fault_trace_signal("end")
+ 
+ # _cofunc_syscall(SYS_SC_PRINT_STAT, b"func_done\0")
+ print(f"t_import_done {t_import_done}")
+-- 
+2.43.0

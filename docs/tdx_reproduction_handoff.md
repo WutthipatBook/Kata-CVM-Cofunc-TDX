@@ -9157,3 +9157,30 @@ objects. The detailed report is
 (SHA-256
 `732a9a43a3004db96f013b2b17edd6fb05123ed4a20150dacd249a9771aeb7e2`).
 Do not start another VM as part of this diagnostic boundary.
+
+### Prepared CoFunc handler EPT trace boundary
+
+No VM has been launched after the DNA telemetry result. The remaining
+pre-fault question now has a bounded implementation:
+
+- Patch 0015 injects an authenticated trace URL through the split-container
+  rootfs and signals immediately around handler execution.
+- `run_cofunc_prefault_ept_pilot.sh` permits one Python workload, one launch,
+  no warm-up, and no retry, with full safety gates and source restoration.
+- `analyze_cofunc_ept_trace.py` fails closed on missing signals, ambiguous QEMU
+  attribution, unpaired EPT lifecycle counts, trace loss, or unknown output.
+
+The signal window contains the recorded `t_import_done` to `t_func_done`
+interval. Consequently, zero gated EPT service records are sufficient to
+prove zero handler-window EPT violations in the traced launch. Synthetic
+zero/nonzero fixtures classify the target correctly, and the full runtime
+patch sequence compiles in a fresh fixture.
+
+SHA-256:
+
+- Patch 0015: `bd66bc9cffdab3c9bfab0f9e81eb37167dae66cc52a23db0173b9ba3c5d02869`
+- Analyzer: `52c43fe1040cd9976d45b1fcb77cf838b93fc97382d813a4f53e2ab8070ae34a`
+- Harness: `222926e49c9ff60d02db357008d7e99837da4155a1e6e5ac0b5430dcc8ddad21`
+
+The next separately approved boundary is one traced Video launch. Do not run
+DNA automatically afterward.

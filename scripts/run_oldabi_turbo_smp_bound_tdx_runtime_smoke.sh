@@ -10,6 +10,7 @@ HUGEPAGE_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0004-Enable-hugepage-setu
 RUNTIME_EXTRA_PATCH="${COFUNC_OLDABI_RUNTIME_EXTRA_PATCH:-}"
 RUNTIME_FOLLOWUP_PATCH="${COFUNC_OLDABI_RUNTIME_FOLLOWUP_PATCH:-}"
 RUNTIME_METRICS_PATCH="${COFUNC_OLDABI_RUNTIME_METRICS_PATCH:-}"
+RUNTIME_TRACE_PATCH="${COFUNC_OLDABI_RUNTIME_TRACE_PATCH:-}"
 CPU_SMOKE="$BUNDLE/scripts/run_oldabi_turbo_msr_skip_cpu_bound_smoke.sh"
 DEFAULT_WORKLOAD="fn_py_face_detection"
 TOOLS="$ARTIFACT/testcases/tools"
@@ -21,7 +22,7 @@ TEMPLATE_PY="$TOOLS/template.py"
 TEMPLATE_JS="$TOOLS/template.js"
 ANALYZE_PY="$TOOLS/analyze.py"
 STAMP="$(date -u +%Y%m%d_%H%M%S)"
-BACKUP_DIR="$BUNDLE/backups/oldabi-tdx-shadow-runtime-$STAMP"
+BACKUP_DIR="${COFUNC_OLDABI_RUNTIME_BACKUP_DIR:-$BUNDLE/backups/oldabi-tdx-shadow-runtime-$STAMP}"
 STOP_AFTER_SMOKE_VALUE="${STOP_AFTER_SMOKE:-1}"
 SKIP_FACE_SMOKE_VALUE="${COFUNC_OLDABI_SKIP_FACE_SMOKE:-0}"
 OUT_KIND="smoke"
@@ -30,7 +31,7 @@ if [[ $STOP_AFTER_SMOKE_VALUE == 0 ]]; then
 fi
 OUT="${OUT:-$ROOT/results/oldabi_5_19_turbo_smp_bound_tdx_runtime_${OUT_KIND}_$STAMP}"
 IMAGE_TAG_BACKUP="pre-oldabi-tdx-runtime-$STAMP"
-RUNTIME_EXTRA_MARKERS='CoFunc grant/accept stat instrumentation|sc_host_grant_total_ns|STAT_N_ACCEPT|n_accept_exec|t_pgfault_exec|STAT_N_PGFAULT|n_pgfault_exec|sc_guest_tsc_hz'
+RUNTIME_EXTRA_MARKERS='CoFunc grant/accept stat instrumentation|sc_host_grant_total_ns|STAT_N_ACCEPT|n_accept_exec|t_pgfault_exec|STAT_N_PGFAULT|n_pgfault_exec|sc_guest_tsc_hz|fault_trace_signal|COFUNC_EPT_TRACE_URL'
 backup_done=0
 SELECTED_WORKLOADS=()
 DOCKER_BUILD_CACHE_ARGS=()
@@ -247,6 +248,11 @@ main() {
 		[[ -n $RUNTIME_FOLLOWUP_PATCH ]] || die "runtime metrics patch requires the follow-up patch"
 		[[ -f "$RUNTIME_METRICS_PATCH" ]] || die "missing runtime metrics patch: $RUNTIME_METRICS_PATCH"
 	fi
+	if [[ -n $RUNTIME_TRACE_PATCH ]]; then
+		[[ -n $RUNTIME_METRICS_PATCH ]] || die "runtime trace patch requires the metrics patch"
+		[[ -f "$RUNTIME_TRACE_PATCH" ]] || die "missing runtime trace patch: $RUNTIME_TRACE_PATCH"
+		[[ -n ${COFUNC_EPT_TRACE_URL:-} ]] || die "runtime trace patch requires COFUNC_EPT_TRACE_URL"
+	fi
 	[[ -x "$CPU_SMOKE" ]] || die "missing smoke helper: $CPU_SMOKE"
 	[[ -f "$ACTION_SH" ]] || die "missing run_sc_fork action: $ACTION_SH"
 	[[ -f "$LEAN_START_SH" ]] || die "missing lean container start helper: $LEAN_START_SH"
@@ -290,6 +296,14 @@ main() {
 		dir="$(workload_dir "$workload")"
 		[[ -d "$dir" ]] || die "missing workload dir: $dir"
 	done
+	if [[ -n $RUNTIME_TRACE_PATCH ]]; then
+		[[ ${#SELECTED_WORKLOADS[@]} -eq 1 ]] \
+			|| die "runtime trace patch requires exactly one selected workload"
+		[[ $SKIP_FACE_SMOKE_VALUE == 1 ]] \
+			|| die "runtime trace patch requires COFUNC_OLDABI_SKIP_FACE_SMOKE=1"
+		[[ $RUNTIME_REPETITIONS == 1 ]] \
+			|| die "runtime trace patch requires COFUNC_OLDABI_RUNTIME_REPETITIONS=1"
+	fi
 
 	ensure_rw
 	mkdir -p "$BACKUP_DIR"
@@ -315,6 +329,7 @@ main() {
 		printf 'cofunc_oldabi_runtime_extra_patch=%s\n' "$RUNTIME_EXTRA_PATCH"
 		printf 'cofunc_oldabi_runtime_followup_patch=%s\n' "$RUNTIME_FOLLOWUP_PATCH"
 		printf 'cofunc_oldabi_runtime_metrics_patch=%s\n' "$RUNTIME_METRICS_PATCH"
+		printf 'cofunc_oldabi_runtime_trace_patch=%s\n' "$RUNTIME_TRACE_PATCH"
 		printf 'cofunc_oldabi_skip_face_smoke=%s\n' "$SKIP_FACE_SMOKE_VALUE"
 		printf 'cofunc_oldabi_regular_memfile=%s\n' "${COFUNC_OLDABI_REGULAR_MEMFILE:-0}"
 		printf 'docker_build_cache_args=%s\n' "${DOCKER_BUILD_CACHE_ARGS[*]}"
@@ -359,6 +374,14 @@ main() {
 				rg -q 'data\["sc_guest_tsc_hz"\]' "$ANALYZE_PY" \
 					|| die "runtime metrics patch did not add calibrated analyzer conversion"
 			fi
+			if [[ -n $RUNTIME_TRACE_PATCH ]]; then
+				log "applying handler EPT trace patch: $RUNTIME_TRACE_PATCH"
+				patch -d "$ARTIFACT" -p1 -i "$RUNTIME_TRACE_PATCH"
+				rg -q '^def fault_trace_signal(phase):' "$TEMPLATE_PY" \
+					|| die "runtime trace patch did not add Python trace signaling"
+				rg -q 'COFUNC_EPT_TRACE_URL' "$ACTION_SH" "$LEAN_START_SH" \
+					|| die "runtime trace patch did not propagate the trace URL"
+			fi
 		fi
 	sha256sum "$CONFIG_H" "$SHADOW_MAIN_C" "$ACTION_SH" "$LEAN_START_SH" "$TEMPLATE_PY" "$TEMPLATE_JS" "$ANALYZE_PY" \
 		>"$BACKUP_DIR/sha256.diagnostic"
@@ -400,6 +423,10 @@ main() {
 				|| die "rebuilt $image image does not contain runtime instrumentation"
 			docker run --rm "$image:latest" sh -c 'grep -R -q "sc_guest_n_accept_before" /func' \
 				|| die "rebuilt $image image does not contain guest stat template instrumentation"
+		fi
+		if [[ -n $RUNTIME_TRACE_PATCH ]]; then
+			docker run --rm "$image:latest" grep -q 'fault_trace_signal("begin")' /func/main.py \
+				|| die "rebuilt $image image does not contain handler trace signaling"
 		fi
 		verify_workload_image "$workload" "$image"
 			docker image inspect "$image:latest" --format '{{.Id}} {{.Created}}' \

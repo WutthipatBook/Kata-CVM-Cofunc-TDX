@@ -520,3 +520,36 @@ Its detailed report is
 `/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_dna_fault_telemetry_20260721_101315/validation_report.md`
 (SHA-256
 `732a9a43a3004db96f013b2b17edd6fb05123ed4a20150dacd249a9771aeb7e2`).
+
+## Prepared host-side CoFunc EPT verification
+
+No additional VM has been launched. A separate one-launch boundary now
+directly tests the remaining pre-fault claim:
+
+- `patches/cofunc-artifact-oldabi/0015-Signal-CoFunc-handler-EPT-trace-window.patch`
+  carries a one-use authenticated URL into the split-container `/tmp` and
+  signals immediately around the Python handler interval.
+- `scripts/run_cofunc_prefault_ept_pilot.sh` allows exactly one Video or DNA
+  workload, one sample, no warm-up, and no retry. It runs before/after safety
+  gates, captures the kernel delta, and verifies exact runtime-source
+  restoration.
+- `scripts/analyze_cofunc_ept_trace.py` requires one QEMU PID in all four
+  aggregate maps, paired EPT exit/page-fault/reentry counts, one ordered
+  authenticated signal pair, and zero trace loss or unparsed output.
+
+The authenticated gate is a strict superset of `t_import_done` through
+`t_func_done`. Therefore, zero gated EPT service records prove zero handler
+EPT violations for that launch. A nonzero count remains a valid experimental
+result rather than being mislabeled as a workload failure.
+
+Patch 0015 applies after patches 0004, 0007, 0012, and 0014 in a fresh fixture;
+the patched Python and shell files compile or pass syntax checks. Synthetic
+zero- and one-event traces produce `prefault_target_passed=true` and `false`,
+respectively. The relevant SHA-256 values are:
+
+- Patch 0015: `bd66bc9cffdab3c9bfab0f9e81eb37167dae66cc52a23db0173b9ba3c5d02869`
+- Analyzer: `52c43fe1040cd9976d45b1fcb77cf838b93fc97382d813a4f53e2ab8070ae34a`
+- Pilot harness: `222926e49c9ff60d02db357008d7e99837da4155a1e6e5ac0b5430dcc8ddad21`
+
+The next permitted runtime boundary is one traced Video launch. DNA remains a
+separate decision after reviewing Video and the postflight safety evidence.
