@@ -164,3 +164,35 @@ snapshot wait and preserves the last 80 diagnostic lines on failure.
 After rebuilding, validation must restart with one isolated face smoke under
 the changed prefault implementation, followed by one DNA smoke only if face
 passes. No automatic retry, churn, or matrix run is permitted.
+
+## Chunked pre-fault rebuild and infrastructure-only face attempt
+
+The chunked pre-fault source was rebuilt on 2026-07-21. The regenerated
+artifact is:
+
+`cvm_os/build/kernel/arch/x86_64/boot/intel_tdx/chcore.iso`
+
+Its SHA-256 is
+`4132a8be22c28f5d45dfc6eeacfd1912a4ff464f91327ce0291dc4d55d559e5d`.
+The split-container object and ISO are newer than the patched source, the
+linked image contains the private pre-fault marker, and temporary diagnostic
+patches 0001, 0002, 0003, 0004, 0006, and 0007 all pass dry-run application.
+
+The first post-rebuild face attempt is preserved at:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_chunked_face_smoke_20260721_051618`
+
+It returned `run_rc=1` with `postflight_gate_rc=0` and
+`host_safety=ready`, but it did not launch a VM. Host huge-page setup stopped
+first when `fallocate` could not populate the 512 MiB hugetlbfs backing file.
+There are no guest logs, pre-fault markers, or KVM/TDX stop markers in this
+attempt, so it is infrastructure-only failed evidence and must not be used to
+evaluate patch 0009.
+
+A subsequent no-VM capacity probe successfully reserved all 256 requested
+2 MiB pages and populated a 512 MiB hugetlbfs file: immediately after
+reservation `nr_hugepages=256` and `free_hugepages=256`; after `fallocate`,
+`free_hugepages=0`; `probe_rc=0`. Its cleanup returned all huge-page counters
+to zero and removed the probe file. This proves the requested backing
+configuration is currently feasible and identifies the earlier stop as
+transient huge-page availability rather than disk exhaustion.
