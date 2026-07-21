@@ -301,3 +301,10 @@ after restoring the known-good dependency set, chunked private pre-faulting
 completes the memory-intensive DNA workload. The single timing record is a
 functional smoke and must not be aggregated as performance data. One isolated
 video-processing smoke is the next bounded functional boundary.
+
+The artifact's video-processing Dockerfile is unchanged since its initial
+commit and is not modified by the established workload-dependency patch, so
+there is no known video image drift equivalent to DNA. The pre-launch runner
+guard nevertheless now requires successful `cv2` and `boto3` imports from the
+rebuilt final video image and preserves their versions, image history, and
+image metadata before calling the VM runner.

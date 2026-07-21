@@ -148,18 +148,32 @@ verify_workload_image() {
 	local workload=$1
 	local image=$2
 	local base_image="${image}_base"
+	local interpreter check
 
-	[[ $workload == "fn_py_dna_visualisation" ]] || return 0
+	case "$workload" in
+	fn_py_dna_visualisation)
+		interpreter=/usr/local/bin/python
+		check='import numpy; print("numpy=" + numpy.__version__); assert numpy.__version__ == "1.26.4"'
+		;;
+	fn_py_video_processing)
+		interpreter=/usr/bin/python3
+		check='import boto3, cv2; print("boto3=" + boto3.__version__); print("opencv=" + cv2.__version__)'
+		;;
+	*)
+		return 0
+		;;
+	esac
 
-	log "verifying pinned DNA Python dependencies before any VM launch"
+	log "verifying $workload Python dependencies before any VM launch"
 	docker image history --no-trunc "$base_image:latest" \
 		>"$BACKUP_DIR/$image.base.history"
-	rg -Fq 'numpy==1.26.4' "$BACKUP_DIR/$image.base.history" \
-		|| die "$base_image:latest history does not contain numpy==1.26.4"
-	if ! docker run --rm --entrypoint /usr/local/bin/python "$image:latest" \
-		-c 'import numpy; print("numpy=" + numpy.__version__); assert numpy.__version__ == "1.26.4"' \
+	if [[ $workload == "fn_py_dna_visualisation" ]]; then
+		rg -Fq 'numpy==1.26.4' "$BACKUP_DIR/$image.base.history" \
+			|| die "$base_image:latest history does not contain numpy==1.26.4"
+	fi
+	if ! docker run --rm --entrypoint "$interpreter" "$image:latest" -c "$check" \
 		| tee "$BACKUP_DIR/$image.python-dependencies"; then
-		die "$image:latest does not import the required NumPy 1.26.4"
+		die "$image:latest failed its pre-launch Python dependency check"
 	fi
 	docker image inspect "$base_image:latest" "$image:latest" \
 		>"$BACKUP_DIR/$image.verified-images.json"
