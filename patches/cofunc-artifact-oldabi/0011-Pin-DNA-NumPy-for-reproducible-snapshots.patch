@@ -1,0 +1,25 @@
+From: CoFunc TDX artifact reproduction <noreply@example.com>
+Date: Tue, 21 Jul 2026 06:20:00 +0000
+Subject: [PATCH] Pin DNA NumPy for reproducible snapshots
+
+Match the dependency set used by the preserved July 8 DNA image that
+successfully completed split-container snapshot creation.  Rebuilding from
+the unpinned Dockerfile reproduced the older /usr/local/bin/python fault at
+VA 0x3120, so do not allow pip to select a different NumPy release.
+---
+ testcases/testcases/fn_py_dna_visualisation/Dockerfile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/testcases/testcases/fn_py_dna_visualisation/Dockerfile b/testcases/testcases/fn_py_dna_visualisation/Dockerfile
+index 8a10069..27f0ae8 100644
+--- a/testcases/testcases/fn_py_dna_visualisation/Dockerfile
++++ b/testcases/testcases/fn_py_dna_visualisation/Dockerfile
+@@ -1,5 +1,5 @@
+ FROM python:alpine3.17
+-RUN pip install minio squiggle==0.3.1
++RUN pip install minio numpy==1.26.4 squiggle==0.3.1
+ RUN mkdir func
+ COPY /tools/template.py /func/main.py
+ COPY prewarm.py /func/prewarm.py
+-- 
+2.34.1

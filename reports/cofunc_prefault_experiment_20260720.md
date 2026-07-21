@@ -154,12 +154,12 @@ It returned `run_rc=124`; the postflight gate remained
   `c1efea8bdac09ab56adb0f5dad68e4b5bf29521bba7dddd79fe38465f8975449`.
 
 Known-good on-demand DNA evidence completed 10/10 in
-`oldabi_guarded_0022_dna_only_retry_20260708_073256`, so the prefault path is
-the differentiating trigger. The failure is not yet proof that bulk MapGPA
-granularity is the root cause. Patch 0009 is the next controlled A/B: it
-keeps all acceptance before process launch but performs one MapGPA/accept per
-allocator chunk, matching the established demand path. Patch 0010 bounds the
-snapshot wait and preserves the last 80 diagnostic lines on failure.
+`oldabi_guarded_0022_dna_only_retry_20260708_073256`. This was initially taken
+as evidence that prefault was the differentiating trigger. Later historical
+and image evidence, documented below, disproved that conclusion: the same DNA
+snapshot fault predates the prefault experiment and depends on workload-image
+state. Patch 0009 remains a valid MapGPA-granularity A/B, and patch 0010 bounds
+the snapshot wait and preserves the last 80 diagnostic lines on failure.
 
 After rebuilding, validation must restart with one isolated face smoke under
 the changed prefault implementation, followed by one DNA smoke only if face
@@ -223,3 +223,45 @@ with SHA-256
 The face control boundary is passed. One correctly selected DNA smoke is now
 the next separately bounded step. No retry, churn, measurement collection, or
 full matrix is authorized by this result.
+
+## Chunked pre-fault DNA result and image drift
+
+The one permitted chunked-prefault DNA attempt ran at:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_chunked_dna_smoke_20260721_054037`
+
+It returned `run_rc=1`, while the postflight gate returned zero and reported
+`host_safety=ready`. Selection was correct and no retry occurred. The new
+snapshot guard detected that the snapshot screen exited, preserved its final
+80 log lines, and returned immediately.
+
+The guest completed all 987 chunked pre-fault operations over its 1,928 MiB
+private data pool, then reproduced the same failure as the bulk experiment:
+
+```text
+CoFunc private pre-fault: gpa=0x784800000 bytes=2069889024 chunks=987 cycles=26701253632
+[INFO] handle_trans_fault: no vmr found for va 0x3120!
+Thread ... IP: 3120 CMD: /usr/local/bin/python
+```
+
+This rules out one multi-gigabyte MapGPA request as the fix. It does not prove
+that prefault causes the process fault:
+
+- The exact `/usr/local/bin/python` VA/IP `0x3120` DNA snapshot failure was
+  already preserved by the June 10 timeout probe, before the prefault
+  experiment existed.
+- The July 8 on-demand run later completed 10/10 with diagnostic image
+  `sha256:07af20737395dd5418aae159341cf77dede70c772ebfd00cbafb0592e568131c`.
+- That known-good image history contains
+  `pip install minio numpy==1.26.4 squiggle==0.3.1`.
+- The failed July 21 diagnostic image
+  `sha256:7cc17a0391eeb9d14ed17460361f790583e5774a9a49f7c806b404ede505ec3f`
+  was rebuilt from the current old-ABI Dockerfile without the NumPy pin. Its
+  history contains only `pip install minio squiggle==0.3.1`.
+
+Therefore this DNA attempt combines the prefault experiment with known
+workload-image drift and is not a clean prefault A/B. Patch 0011 applies only
+the missing DNA NumPy pin, matching the established dependency-fix patch and
+the preserved successful image. Rebuild and image verification are required
+before considering one further DNA launch. The current failed run must not be
+aggregated.
