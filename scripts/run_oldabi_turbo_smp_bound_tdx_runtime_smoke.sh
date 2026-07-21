@@ -378,7 +378,7 @@ main() {
 			if [[ -n $RUNTIME_TRACE_PATCH ]]; then
 				log "applying handler EPT trace patch: $RUNTIME_TRACE_PATCH"
 				patch -d "$ARTIFACT" -p1 -i "$RUNTIME_TRACE_PATCH"
-				rg -q '^def fault_trace_signal(phase):' "$TEMPLATE_PY" \
+				rg -q '^def fault_trace_signal\(phase\):$' "$TEMPLATE_PY" \
 					|| die "runtime trace patch did not add Python trace signaling"
 				rg -q 'COFUNC_EPT_TRACE_URL' "$ACTION_SH" "$LEAN_START_SH" \
 					|| die "runtime trace patch did not propagate the trace URL"
