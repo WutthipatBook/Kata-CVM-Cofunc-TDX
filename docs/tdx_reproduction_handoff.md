@@ -9059,3 +9059,28 @@ timestamp and its `exec_log` has no latency output. The corrected model uses
 the preserved Figshare-v4 `latency 2269.959229` ns/page record. Only one valid
 record is locally preserved, although the released evaluator intended 50, so
 the CoW coefficient has an explicit sampling limitation.
+
+## 2026-07-21 CoFunc pre-fault counter-unit correction
+
+Chunked private pre-faulting is functionally validated for face detection,
+pinned DNA, and video. The corrected private-syscall video pilot is preserved
+at
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_video_private_syscall_20260721_073012`.
+It completed on one launch with ready pre/post safety gates, zero deferred
+accepts, and no KVM/TDX stop marker.
+
+The pilot proves a 64-bit raw page-fault cycle delta of 3,095,835,376. It does
+not prove `t_pgfault_exec=3.095835376` seconds. The guest fault path accumulates
+`get_cycles()`/`RDTSC`, while the legacy analyzer divided by 1e9 without the
+guest TSC frequency. Host CPUID reports an invariant 2.8 GHz TSC and QEMU used
+`-cpu host` with no override, implying approximately 1.105655491 seconds, but
+the guest's PIT-calibrated frequency was not logged. The detailed corrected
+report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_video_private_syscall_20260721_073012/validation_report.md`
+(SHA-256 `2a6768126d25e7f6c2899d7ecbb9876326d75543a5d67da5716d9c17522ce61f`).
+
+Patch 0007 now emits `t_pgfault_exec_cycles` and
+`t_pgfault_import_cycles`; it no longer labels raw cycles as seconds. The next
+fault-comparison phase must add both `sc_n_pgfault` and guest-calibrated TSC
+frequency telemetry before collecting DNA or video measurements. Do not use
+the legacy `t_pgfault_*` seconds fields from earlier analyzer JSON.

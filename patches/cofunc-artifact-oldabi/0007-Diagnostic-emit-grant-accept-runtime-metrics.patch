@@ -188,7 +188,7 @@ Add temporary instrumentation for the old-ABI TDX path:
 +    for key in ["t_encrypt_exec", "t_grant_exec", "t_delegate_exec", "t_attest_import", "t_grant_import", "t_delegate_import", "t_pgfault_exec", "t_pgfault_import"]:
 -        result[key] = data[key] / 10 ** 9
 +        if key in data:
-+            result[key] = data[key] / 10 ** 9
++            result[key if not key.startswith("t_pgfault") else f"{key}_cycles"] = data[key] / (1 if key.startswith("t_pgfault") else 10 ** 9)
 +    add_instrumentation_metrics()
  
  
@@ -205,7 +205,7 @@ Add temporary instrumentation for the old-ABI TDX path:
 +    for key in ["t_encrypt_exec", "t_grant_exec", "t_delegate_exec", "t_attest_import", "t_grant_import", "t_delegate_import", "t_pgfault_exec", "t_pgfault_import"]:
 -        result[key] = data[key] / 10 ** 9
 +        if key in data:
-+            result[key] = data[key] / 10 ** 9
++            result[key if not key.startswith("t_pgfault") else f"{key}_cycles"] = data[key] / (1 if key.startswith("t_pgfault") else 10 ** 9)
 +    add_instrumentation_metrics()
  
  

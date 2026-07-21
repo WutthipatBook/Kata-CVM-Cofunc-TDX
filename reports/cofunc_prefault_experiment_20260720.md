@@ -87,10 +87,12 @@ The required boundary passed on 2026-07-20. Evidence is preserved at:
 - Runtime instrumentation reported `n_accept_import=0` and
   `n_accept_exec=0`. The private acceptance work therefore finished during
   split-container initialization rather than import or handler execution.
-- The workload still had `n_cow=3400`, `t_pgfault_import=0.000902878 s`, and
-  `t_pgfault_exec=0.039062914 s`. This confirms that the experiment removes
-  deferred TDX private-page acceptance, not guest first-level demand paging
-  or CoW behavior.
+- The workload still had `n_cow=3400` and nonzero raw page-fault counters.
+  The legacy analyzer rendered those raw TSC-cycle values as
+  `t_pgfault_import=0.000902878` and `t_pgfault_exec=0.039062914` by dividing
+  by 1e9; they are not seconds. The nonzero counters still confirm that the
+  experiment removes deferred TDX private-page acceptance, not guest
+  first-level demand paging or CoW behavior.
 - All 64 bounded private TDP-MMU records had `req=1`, `goal=1`, and
   `iter_level=1`. There were zero private level-2 records and zero private
   2 MiB promotions.
@@ -391,8 +393,15 @@ The corrected follow-up passed on its only VM launch:
   the `c_long` return declaration and the post-execution counter read.
 - One marker pre-faulted 211,812,352 bytes in 101 chunks.
 - Raw page-fault values were 853,952 before and 3,096,689,328 after execution.
-  Their exact nonnegative delta was 3,095,835,376, which the analyzer reported
-  as `t_pgfault_exec=3.095835376`.
+  Their exact nonnegative delta was 3,095,835,376 TSC cycles. The analyzer
+  reported `t_pgfault_exec=3.095835376`, but that value is not seconds: the
+  page-fault path accumulates `get_cycles()`/`RDTSC` deltas, whereas the
+  analyzer divided by 1e9 without applying the guest TSC frequency.
+- Host CPUID leaf 0x15 reports a 2.8 GHz invariant TSC, and this run used
+  QEMU `-cpu host` without a TSC-frequency override. Under that inherited
+  frequency the delta is approximately 1.105655491 seconds. The guest's
+  PIT-calibrated `cur_freq` was not logged, so the preserved run does not
+  independently establish an exact seconds conversion.
 - Both accept deltas were zero. Stop markers, bad-page markers, log loss,
   private 2 MiB promotions, process translation faults, and early exits were
   absent.
@@ -402,12 +411,14 @@ This confirms patch 0012 and completes bounded functional validation of
 chunked private pre-faulting for face, pinned DNA, and video. The one timing
 record remains a counter-validation smoke and is not a performance sample.
 
-The remaining measurement gap is count, not time: `sc_t_pgfault` now provides
-usable cumulative first-level page-fault time, but `n_cow` is only a subset of
-faults. A comparable fault-frequency experiment requires a separately bounded
-`sc_n_pgfault` counter before DNA/video sampling.
+Patch 0012 now provides a usable cumulative first-level page-fault cycle
+counter, but exact time and count remain measurement gaps. `n_cow` is only a
+subset of faults. A comparable fault-frequency experiment requires separately
+bounded `sc_n_pgfault` and guest TSC-frequency telemetry before DNA/video
+sampling. The analyzer patch now emits `t_pgfault_*_cycles` instead of
+mislabeling raw cycles as seconds.
 
 Detailed validation:
 `/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_video_private_syscall_20260721_073012/validation_report.md`
 (SHA-256
-`9f1598dfcfcf32d9bcd662b87059cde50a4d0d3df40edfcb43a2ff5c18d32940`).
+`2a6768126d25e7f6c2899d7ecbb9876326d75543a5d67da5716d9c17522ce61f`).
