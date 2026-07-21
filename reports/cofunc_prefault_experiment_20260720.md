@@ -308,3 +308,41 @@ there is no known video image drift equivalent to DNA. The pre-launch runner
 guard nevertheless now requires successful `cv2` and `boto3` imports from the
 rebuilt final video image and preserves their versions, image history, and
 image metadata before calling the VM runner.
+
+## Chunked pre-fault video result
+
+The isolated video-processing smoke passed on its only VM launch:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_chunked_video_20260721_063648`
+
+- `run_rc=0` and the postflight gate reported `host_safety=ready`.
+- The final diagnostic image imported boto3 1.43.34 and OpenCV 4.6.0 before
+  launch. Its image ID was
+  `sha256:4a3d6f5d187ed18648a0ed9a805d6ed904d6e545a8e2c018330bb48cb7c215ee`.
+- One marker covered 211,812,352 bytes in exactly 101 2 MiB chunks and
+  reported 1,703,329,282 cycles.
+- The workload completed with `n_accept_import=0`, `n_accept_exec=0`, and
+  `t_e2e=52.622435331344604 s`.
+- KVM/TDX stop markers, bad-page markers, log loss, private 2 MiB promotions,
+  process translation faults, and early snapshot exits were all absent.
+- Temporary runtime-source restoration matched the pre-run hashes exactly.
+
+The run exposed a diagnostic ABI defect: `sc_t_pgfault` is an unsigned long
+in the guest kernel and `SYS_SC_GET_STAT` returns a long, but Python ctypes
+used its undeclared default signed 32-bit return type. The after-execution
+value therefore wrapped from at least 2,974,394,594 to -1,320,572,702. The
+reported negative `t_pgfault_exec` is invalid and this smoke must not be used
+for page-fault timing or performance aggregation. Patch 0007 now declares
+`libc.syscall.restype = ctypes.c_long`; a later measurement pilot must rebuild
+the runtime image and verify nonnegative 64-bit counters before collecting
+comparison data.
+
+Functionally, pre-faulting is now validated by isolated face, pinned DNA, and
+video smokes. The next phase is not another workload expansion: it is a
+bounded fault-counter/timing pilot under corrected instrumentation for the
+memory-intensive DNA and video targets.
+
+The detailed video validation report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_chunked_video_20260721_063648/validation_report.md`
+(SHA-256
+`49c69b8e46ddd9a661c38d2ca3227ef3ccef73139f7791575cba130e592d15c5`).

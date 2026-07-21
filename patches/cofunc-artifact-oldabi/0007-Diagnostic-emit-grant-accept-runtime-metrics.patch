@@ -14,8 +14,8 @@ Add temporary instrumentation for the old-ABI TDX path:
  shadow_container/main.c     | 45 +++++++++++++++++++++++++++++++++++--
  testcases/tools/analyze.py  | 23 +++++++++++++++++--
  testcases/tools/template.js | 18 +++++++++++++++
- testcases/tools/template.py | 18 +++++++++++++++
- 4 files changed, 99 insertions(+), 5 deletions(-)
+ testcases/tools/template.py | 19 ++++++++++++++++
+ 4 files changed, 100 insertions(+), 5 deletions(-)
 
 --- a/shadow_container/main.c
 +++ b/shadow_container/main.c
@@ -259,6 +259,12 @@ Add temporary instrumentation for the old-ABI TDX path:
    })  
 --- a/testcases/tools/template.py
 +++ b/testcases/tools/template.py
+@@ -1,4 +1,5 @@
+ import sys, ctypes, time, os, json, sc
+ import urllib.parse, urllib.request
+ libc = ctypes.CDLL(None)
++libc.syscall.restype = ctypes.c_long
+ sys.dont_write_bytecode = True
 @@ -14,6 +14,8 @@ STAT_T_ATTEST   = 0x3
  STAT_T_ENCRYPT  = 0x4
  STAT_T_GRANT    = 0x5
