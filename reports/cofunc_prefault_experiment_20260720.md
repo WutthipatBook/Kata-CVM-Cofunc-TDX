@@ -379,3 +379,35 @@ The detailed failed-counter validation report is
 `/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_video_64bit_counter_20260721_070038/validation_report.md`
 (SHA-256
 `800b567ca28f4eea4fd8c777478510db56c86b107a358d17986e9d8ddd43d967`).
+
+## Successful private-syscall counter pilot
+
+The corrected follow-up passed on its only VM launch:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_video_private_syscall_20260721_073012`
+
+- `run_rc=0` and postflight `host_safety=ready`.
+- Pre-launch evidence proved the final image used `_cofunc_syscall` both for
+  the `c_long` return declaration and the post-execution counter read.
+- One marker pre-faulted 211,812,352 bytes in 101 chunks.
+- Raw page-fault values were 853,952 before and 3,096,689,328 after execution.
+  Their exact nonnegative delta was 3,095,835,376, which the analyzer reported
+  as `t_pgfault_exec=3.095835376`.
+- Both accept deltas were zero. Stop markers, bad-page markers, log loss,
+  private 2 MiB promotions, process translation faults, and early exits were
+  absent.
+- Runtime source restoration matched the pre-run hashes exactly.
+
+This confirms patch 0012 and completes bounded functional validation of
+chunked private pre-faulting for face, pinned DNA, and video. The one timing
+record remains a counter-validation smoke and is not a performance sample.
+
+The remaining measurement gap is count, not time: `sc_t_pgfault` now provides
+usable cumulative first-level page-fault time, but `n_cow` is only a subset of
+faults. A comparable fault-frequency experiment requires a separately bounded
+`sc_n_pgfault` counter before DNA/video sampling.
+
+Detailed validation:
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_video_private_syscall_20260721_073012/validation_report.md`
+(SHA-256
+`9f1598dfcfcf32d9bcd662b87059cde50a4d0d3df40edfcb43a2ff5c18d32940`).
