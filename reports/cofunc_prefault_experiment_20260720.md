@@ -196,3 +196,30 @@ reservation `nr_hugepages=256` and `free_hugepages=256`; after `fallocate`,
 to zero and removed the probe file. This proves the requested backing
 configuration is currently feasible and identifies the earlier stop as
 transient huge-page availability rather than disk exhaustion.
+
+## Chunked pre-fault face control
+
+The new isolated face control passed on its only VM launch:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_chunked_face_smoke_20260721_053155`
+
+- `run_rc=0`, `postflight_gate_rc=0`, and `host_safety=ready`.
+- The run-local source backup matches commit `f7f46b8` and contains one
+  `change_phys_state()` call per allocator chunk.
+- The diagnostic ISO SHA-256 is
+  `68acd006850963be1495de403ce83a2ac21abe6d8c39db70fd38b436d5041b2b`.
+- Exactly one marker covers the full 456 MiB private data pool:
+  `bytes=478150656 chunks=228 cycles=3843024732`.
+- `n_accept_import=0`, `n_accept_exec=0`, `n_cow=3400`, and
+  `t_e2e=2.520723342895508 s`.
+- KVM/TDX stop markers, bad-page markers, log-loss markers, and private 2 MiB
+  promotion markers are all zero. The postflight gate found no residue.
+
+The detailed validation report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_chunked_face_smoke_20260721_053155/validation_report.md`
+with SHA-256
+`9c9634f5b7c2fb9f075317a7f26bb43cc38fabeaf9885d4072968c094b2b6e87`.
+
+The face control boundary is passed. One correctly selected DNA smoke is now
+the next separately bounded step. No retry, churn, measurement collection, or
+full matrix is authorized by this result.
