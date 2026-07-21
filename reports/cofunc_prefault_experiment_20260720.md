@@ -272,3 +272,32 @@ After rebuilding the diagnostic base and final images, it requires both a
 the final image. It preserves the history, import output, and full image
 metadata in the run backup. Any mismatch stops before the lower-level VM
 runner is called.
+
+## Corrected chunked pre-fault DNA result
+
+The corrected, pinned-image run passed on its only VM launch:
+
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_prefault_chunked_dna_pinned_20260721_060706`
+
+- `run_rc=0` and the postflight gate reported `host_safety=ready`.
+- The rebuilt final image imported NumPy 1.26.4 before VM launch. Its image ID
+  was `sha256:7f3c9eb12927c75878ab2b59f58fde51befffef5414e85f862f0ed013daf9e54`.
+- One pre-fault marker covered 1,008,730,112 bytes in exactly 481 2 MiB
+  chunks. The marker reported 11,797,490,862 cycles.
+- The workload completed with `n_accept_import=0`, `n_accept_exec=0`, and
+  `t_e2e=26.4892840385437 s`.
+- The previous VA `0x3120` process fault, early snapshot exit, KVM/TDX stop
+  markers, bad-page markers, log loss, and private 2 MiB promotions were all
+  absent.
+- Temporary runtime source restoration matched the pre-run hashes exactly.
+
+The detailed report is
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_chunked_dna_pinned_20260721_060706/validation_report.md`
+(SHA-256
+`87bf968684b6519516b6049116dfd838bbd52de7c39ad98c974b8318499c8d27`).
+
+This establishes that the earlier failure was not a clean pre-fault result:
+after restoring the known-good dependency set, chunked private pre-faulting
+completes the memory-intensive DNA workload. The single timing record is a
+functional smoke and must not be aggregated as performance data. One isolated
+video-processing smoke is the next bounded functional boundary.
