@@ -380,6 +380,10 @@ main() {
 				patch -d "$ARTIFACT" -p1 -i "$RUNTIME_TRACE_PATCH"
 				rg -q '^def fault_trace_signal\(phase\):$' "$TEMPLATE_PY" \
 					|| die "runtime trace patch did not add Python trace signaling"
+				rg -q 'EPT_TRACE_URL_PATH = "/func/\.cofunc-ept-trace-url"' "$TEMPLATE_PY" \
+					|| die "runtime trace patch did not use the split-visible function path"
+				rg -q 'trace_url_host="\.rootfs/\$name/func/\.cofunc-ept-trace-url"' "$LEAN_START_SH" \
+					|| die "runtime trace patch did not populate the exported function rootfs"
 				rg -q 'COFUNC_EPT_TRACE_URL' "$ACTION_SH" "$LEAN_START_SH" \
 					|| die "runtime trace patch did not propagate the trace URL"
 			fi
@@ -426,7 +430,8 @@ main() {
 				|| die "rebuilt $image image does not contain guest stat template instrumentation"
 		fi
 		if [[ -n $RUNTIME_TRACE_PATCH ]]; then
-			docker run --rm "$image:latest" grep -q 'fault_trace_signal("begin")' /func/main.py \
+			docker run --rm "$image:latest" sh -c \
+				'grep -Fq '\''fault_trace_signal("begin")'\'' /func/main.py && grep -Fq '\''EPT_TRACE_URL_PATH = "/func/.cofunc-ept-trace-url"'\'' /func/main.py' \
 				|| die "rebuilt $image image does not contain handler trace signaling"
 		fi
 		verify_workload_image "$workload" "$image"

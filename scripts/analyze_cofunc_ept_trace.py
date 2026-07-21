@@ -139,7 +139,6 @@ def parse_trace_result(path: Path) -> dict[str, int]:
         "command_rc": 0,
         "trace_ready": 1,
         "trace_stopped": 1,
-        "vm_aggregate_records": 4,
         "signal_begin_count": 1,
         "signal_end_count": 1,
         "loss_markers": 0,
@@ -151,6 +150,12 @@ def parse_trace_result(path: Path) -> dict[str, int]:
             )
     if "ept_service_records" not in values:
         raise SystemExit("trace result omits ept_service_records")
+    aggregate_records = values.get("vm_aggregate_records", 0)
+    if aggregate_records <= 0 or aggregate_records % len(AGGREGATE_NAMES):
+        raise SystemExit(
+            "trace-result vm_aggregate_records must be a positive multiple of "
+            f"{len(AGGREGATE_NAMES)}, got {aggregate_records}"
+        )
     return values
 
 
@@ -200,24 +205,24 @@ def parse_trace(path: Path) -> dict[str, Any]:
     if unknown:
         raise SystemExit(f"trace contains unparsed output: {unknown}")
     pid_sets = {name: set(values) for name, values in aggregates.items()}
-    if any(len(pids) != 1 for pids in pid_sets.values()):
-        raise SystemExit(f"expected one QEMU PID in every aggregate map: {pid_sets}")
-    expected_pids = set.union(*pid_sets.values())
-    if len(expected_pids) != 1 or any(pids != expected_pids for pids in pid_sets.values()):
+    if any(not pids for pids in pid_sets.values()):
+        raise SystemExit(f"expected a nonempty QEMU PID set in every map: {pid_sets}")
+    expected_pids = next(iter(pid_sets.values()))
+    if any(pids != expected_pids for pids in pid_sets.values()):
         raise SystemExit(f"aggregate PID mismatch: {pid_sets}")
-    qemu_pid = next(iter(expected_pids))
-    exits = aggregates["vm_ept_exits"][qemu_pid]
-    faults = aggregates["vm_ept_faults"][qemu_pid]
-    reentries = aggregates["vm_service_count"][qemu_pid]
-    if exits != faults or exits != reentries:
-        raise SystemExit(
-            f"unpaired EPT lifecycle for PID {qemu_pid}: "
-            f"exits={exits} faults={faults} reentries={reentries}"
-        )
-    if any(service["pid"] != qemu_pid for service in services):
+    for qemu_pid in sorted(expected_pids):
+        exits = aggregates["vm_ept_exits"][qemu_pid]
+        faults = aggregates["vm_ept_faults"][qemu_pid]
+        reentries = aggregates["vm_service_count"][qemu_pid]
+        if exits != faults or exits != reentries:
+            raise SystemExit(
+                f"unpaired EPT lifecycle for PID {qemu_pid}: "
+                f"exits={exits} faults={faults} reentries={reentries}"
+            )
+    if any(service["pid"] not in expected_pids for service in services):
         raise SystemExit("gated service record belongs to an unexpected QEMU PID")
     return {
-        "qemu_pid": qemu_pid,
+        "qemu_pids": sorted(expected_pids),
         "services": services,
         "aggregates": aggregates,
     }
@@ -258,7 +263,7 @@ def render_markdown(result: dict[str, Any]) -> str:
             f"- Authenticated gated-window EPT violations: {gated['count']}",
             f"- VM-lifetime EPT violations: {vm['fault_count']}",
             f"- VM-lifetime paired service: {vm['service_sum_ns'] / 1e9:.9f} s",
-            f"- QEMU PID: {result['qemu_pid']}",
+            "- QEMU PIDs: " + ", ".join(map(str, result["qemu_pids"])),
             "",
             "The authenticated signal window is a strict superset of the recorded",
             "`t_import_done` to `t_func_done` handler interval. A zero gated count",
@@ -276,8 +281,8 @@ def render_markdown(result: dict[str, Any]) -> str:
             "## Integrity",
             "",
             "- Exactly one ordered authenticated begin/end pair",
-            "- Exactly one QEMU PID in all four aggregate maps",
-            "- EPT exits, KVM page faults, and reentries paired exactly",
+            "- Identical nonempty QEMU PID sets in all four aggregate maps",
+            "- EPT exits, KVM page faults, and reentries paired per PID",
             "- No trace-loss or unparsed-output markers",
             f"- Signal-only boundary EPT records: {result['signal_only_ept_count']}",
             "",
@@ -298,6 +303,12 @@ def main() -> None:
             "gated service count mismatch: "
             f"{trace_result['ept_service_records']} != {len(services)}"
         )
+    aggregate_records = sum(len(values) for values in trace["aggregates"].values())
+    if trace_result["vm_aggregate_records"] != aggregate_records:
+        raise SystemExit(
+            "VM aggregate record count mismatch: "
+            f"{trace_result['vm_aggregate_records']} != {aggregate_records}"
+        )
 
     handler_start = markers["t_import_done"]
     handler_end = markers["t_func_done"]
@@ -315,13 +326,22 @@ def main() -> None:
         for service in services
         if handler_start <= service["wall_s"] <= handler_end
     ]
-    qemu_pid = trace["qemu_pid"]
+    qemu_pids = trace["qemu_pids"]
     aggregates = trace["aggregates"]
-    vm_faults = aggregates["vm_ept_faults"][qemu_pid]
-    vm_service_ns = aggregates["vm_service_ns"][qemu_pid]
+    per_pid = {
+        str(qemu_pid): {
+            "exit_count": aggregates["vm_ept_exits"][qemu_pid],
+            "fault_count": aggregates["vm_ept_faults"][qemu_pid],
+            "reentry_count": aggregates["vm_service_count"][qemu_pid],
+            "service_sum_ns": aggregates["vm_service_ns"][qemu_pid],
+        }
+        for qemu_pid in qemu_pids
+    }
+    vm_faults = sum(row["fault_count"] for row in per_pid.values())
+    vm_service_ns = sum(row["service_sum_ns"] for row in per_pid.values())
     result = {
         "workload": args.workload,
-        "qemu_pid": qemu_pid,
+        "qemu_pids": qemu_pids,
         "guest": {
             "t_exec": guest["t_exec"],
             "n_accept_exec": guest["n_accept_exec"],
@@ -337,11 +357,12 @@ def main() -> None:
         "gated_ept_service": service_stats(services),
         "signal_only_ept_count": len(services) - len(handler_services),
         "vm_lifetime": {
-            "exit_count": aggregates["vm_ept_exits"][qemu_pid],
+            "exit_count": sum(row["exit_count"] for row in per_pid.values()),
             "fault_count": vm_faults,
-            "reentry_count": aggregates["vm_service_count"][qemu_pid],
+            "reentry_count": sum(row["reentry_count"] for row in per_pid.values()),
             "service_sum_ns": vm_service_ns,
             "mean_service_ns": vm_service_ns / vm_faults if vm_faults else None,
+            "per_pid": per_pid,
         },
         "prefault_target_passed": len(services) == 0,
         "trace_result": trace_result,

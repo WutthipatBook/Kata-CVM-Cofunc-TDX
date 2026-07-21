@@ -523,33 +523,47 @@ Its detailed report is
 
 ## Prepared host-side CoFunc EPT verification
 
-No additional VM has been launched. A separate one-launch boundary now
-directly tests the remaining pre-fault claim:
+A separate one-launch boundary directly tests the remaining pre-fault claim:
 
 - `patches/cofunc-artifact-oldabi/0015-Signal-CoFunc-handler-EPT-trace-window.patch`
-  carries a one-use authenticated URL into the split-container `/tmp` and
-  signals immediately around the Python handler interval.
+  carries a one-use authenticated URL beside the handler at
+  `/func/.cofunc-ept-trace-url` and signals immediately around the Python
+  handler interval.
 - `scripts/run_cofunc_prefault_ept_pilot.sh` allows exactly one Video or DNA
   workload, one sample, no warm-up, and no retry. It runs before/after safety
   gates, captures the kernel delta, and verifies exact runtime-source
   restoration.
-- `scripts/analyze_cofunc_ept_trace.py` requires one QEMU PID in all four
-  aggregate maps, paired EPT exit/page-fault/reentry counts, one ordered
-  authenticated signal pair, and zero trace loss or unparsed output.
+- `scripts/analyze_cofunc_ept_trace.py` requires identical nonempty PID sets
+  in all four aggregate maps, paired EPT exit/page-fault/reentry counts for
+  every PID, one ordered authenticated signal pair, and zero trace loss or
+  unparsed output.
 
 The authenticated gate is a strict superset of `t_import_done` through
 `t_func_done`. Therefore, zero gated EPT service records prove zero handler
 EPT violations for that launch. A nonzero count remains a valid experimental
 result rather than being mislabeled as a workload failure.
 
-Patch 0015 applies after patches 0004, 0007, 0012, and 0014 in a fresh fixture;
-the patched Python and shell files compile or pass syntax checks. Synthetic
-zero- and one-event traces produce `prefault_target_passed=true` and `false`,
-respectively. The relevant SHA-256 values are:
+The first launch reaching the workload is preserved at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_video_processing_20260721_133130`.
+It completed the 211,812,352-byte pre-fault, then failed before the `begin`
+signal because `/tmp/cofunc-ept-trace-url` was not visible to the split
+execution context. The trace recorded three lifecycle PIDs and no signal,
+while postflight remained ready with no stop marker or residue. This is not a
+handler-EPT result. It exposed both the invalid `/tmp` transport and the
+analyzer's invalid single-PID assumption.
 
-- Patch 0015: `bd66bc9cffdab3c9bfab0f9e81eb37167dae66cc52a23db0173b9ba3c5d02869`
-- Analyzer: `52c43fe1040cd9976d45b1fcb77cf838b93fc97382d813a4f53e2ab8070ae34a`
+Patch 0015 now writes the owner-only URL into the ephemeral exported rootfs
+under `/func`, which is the same filesystem containing the executing
+`main.py`; the established outer cleanup removes that rootfs. The complete
+0003/0004/0007/0012/0014/0015 sequence applies in a fail-fast fresh fixture,
+and the patched Python and shell files pass syntax checks. End-to-end tests
+cover zero and nonzero gated events across two lifecycle PIDs and reject an
+unpaired per-PID lifecycle. The relevant SHA-256 values are:
+
+- Patch 0015: `d266a0d3cadae9e5bdde5f03c645da77057241261b994eafbf9bd9ae9c53daf3`
+- Analyzer: `3cf48effdd6831b895da2b2c0c1aa93fc5c4252cd4133b3a2527d36883f2c941`
 - Pilot harness: `222926e49c9ff60d02db357008d7e99837da4155a1e6e5ac0b5430dcc8ddad21`
+- Analyzer tests: `b0c308a3201f3aa76f57d9d2aa93fdd5154ada1aad8887b529be8c21d1cc7789`
 
 The next permitted runtime boundary is one traced Video launch. DNA remains a
 separate decision after reviewing Video and the postflight safety evidence.

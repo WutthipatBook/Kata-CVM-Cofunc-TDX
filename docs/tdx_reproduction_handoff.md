@@ -9160,27 +9160,42 @@ Do not start another VM as part of this diagnostic boundary.
 
 ### Prepared CoFunc handler EPT trace boundary
 
-No VM has been launched after the DNA telemetry result. The remaining
-pre-fault question now has a bounded implementation:
+The remaining pre-fault question has a bounded implementation:
 
 - Patch 0015 injects an authenticated trace URL through the split-container
   rootfs and signals immediately around handler execution.
 - `run_cofunc_prefault_ept_pilot.sh` permits one Python workload, one launch,
   no warm-up, and no retry, with full safety gates and source restoration.
-- `analyze_cofunc_ept_trace.py` fails closed on missing signals, ambiguous QEMU
-  attribution, unpaired EPT lifecycle counts, trace loss, or unknown output.
+- `analyze_cofunc_ept_trace.py` fails closed on missing signals, mismatched
+  lifecycle PID sets, unpaired per-PID EPT counts, trace loss, or unknown
+  output.
 
 The signal window contains the recorded `t_import_done` to `t_func_done`
 interval. Consequently, zero gated EPT service records are sufficient to
-prove zero handler-window EPT violations in the traced launch. Synthetic
-zero/nonzero fixtures classify the target correctly, and the full runtime
-patch sequence compiles in a fresh fixture.
+prove zero handler-window EPT violations in the traced launch.
+
+The launch at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_video_processing_20260721_133130`
+completed Video pre-fault but failed before its authenticated `begin` signal:
+the original `/tmp/cofunc-ept-trace-url` transport was not visible beside the
+executing `/func/main.py`. It recorded three lifecycle PIDs, zero signal
+records, no KVM/TDX stop marker, a ready postflight, exact source restoration,
+and no residue. It is not evidence for or against handler EPT faults.
+
+Patch 0015 now places the owner-only URL at
+`/func/.cofunc-ept-trace-url` in the ephemeral exported rootfs. The analyzer
+accepts one or more lifecycle PIDs only when all four aggregate maps have the
+same nonempty PID set and every PID has exactly paired exit, page-fault, and
+reentry counts. The full patch sequence compiles in a fail-fast fixture. Three
+end-to-end analyzer tests cover multi-PID zero/nonzero gated traces and reject
+an unpaired lifecycle.
 
 SHA-256:
 
-- Patch 0015: `bd66bc9cffdab3c9bfab0f9e81eb37167dae66cc52a23db0173b9ba3c5d02869`
-- Analyzer: `52c43fe1040cd9976d45b1fcb77cf838b93fc97382d813a4f53e2ab8070ae34a`
+- Patch 0015: `d266a0d3cadae9e5bdde5f03c645da77057241261b994eafbf9bd9ae9c53daf3`
+- Analyzer: `3cf48effdd6831b895da2b2c0c1aa93fc5c4252cd4133b3a2527d36883f2c941`
 - Harness: `222926e49c9ff60d02db357008d7e99837da4155a1e6e5ac0b5430dcc8ddad21`
+- Analyzer tests: `b0c308a3201f3aa76f57d9d2aa93fdd5154ada1aad8887b529be8c21d1cc7789`
 
 The next separately approved boundary is one traced Video launch. Do not run
 DNA automatically afterward.

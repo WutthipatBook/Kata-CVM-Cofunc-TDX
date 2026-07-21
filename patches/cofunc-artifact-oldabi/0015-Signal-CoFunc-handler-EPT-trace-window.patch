@@ -6,10 +6,10 @@ Pass an authenticated host trace URL through the split-container rootfs and
 signal immediately around handler execution. This patch is diagnostic-only
 and requires COFUNC_EPT_TRACE_URL at runtime.
 ---
- testcases/tools/lean_container/start.sh       | 20 ++++++++++++++++++++
+ testcases/tools/lean_container/start.sh       | 13 +++++++++++++
  testcases/tools/tasks/run_sc_fork/action.sh   |  1 +
  testcases/tools/template.py                   | 15 +++++++++++++++
- 3 files changed, 36 insertions(+)
+ 3 files changed, 29 insertions(+)
 
 diff --git a/testcases/tools/lean_container/start.sh b/testcases/tools/lean_container/start.sh
 --- a/testcases/tools/lean_container/start.sh
@@ -22,20 +22,7 @@ diff --git a/testcases/tools/lean_container/start.sh b/testcases/tools/lean_cont
  
  cleanup_regular_memfile() {
          if [[ -n ${regular_memfile_host:-} ]]; then
-@@ -23,6 +24,12 @@ cleanup_regular_memfile() {
-         fi
- }
- 
-+trace_url_host=""
-+cleanup_trace_url() {
-+        if [[ -n ${trace_url_host:-} ]]; then
-+                rm -f "$trace_url_host"
-+        fi
-+}
- 
- # if [[ "$fn_name" =~ "_py_" ]]; then
- #         cpu_param="--cpuset-cpus 0"
-@@ -39,6 +46,11 @@ if [[ $regular_memfile != 0 && $regular_memfile != 1 ]]; then
+@@ -39,6 +40,11 @@ if [[ $regular_memfile != 0 && $regular_memfile != 1 ]]; then
          exit 1
  fi
  
@@ -47,17 +34,16 @@ diff --git a/testcases/tools/lean_container/start.sh b/testcases/tools/lean_cont
  if [[ $regular_memfile == 1 ]]; then
          mem_file="/tmp/split_container/${fn_name}_1"
  fi
-@@ -67,6 +79,14 @@ if [[ $regular_memfile == 1 ]]; then
+@@ -67,6 +73,13 @@ if [[ $regular_memfile == 1 ]]; then
          trap cleanup_regular_memfile EXIT
  fi
  
-+trace_url_host=".rootfs/$name/tmp/cofunc-ept-trace-url"
++trace_url_host=".rootfs/$name/func/.cofunc-ept-trace-url"
 +if [[ ! -d $(dirname "$trace_url_host") ]]; then
-+        echo "missing split-container tmp directory: $(dirname "$trace_url_host")"
++        echo "missing split-container function directory: $(dirname "$trace_url_host")"
 +        exit 1
 +fi
-+printf '%s\n' "$trace_url" >"$trace_url_host"
-+trap 'cleanup_trace_url; cleanup_regular_memfile' EXIT
++(umask 077; printf '%s\n' "$trace_url" >"$trace_url_host")
 +
  # if [[ $result_log != "" ]]; then
  #         echo "new test @ $(date)" >> $result_log
@@ -79,7 +65,7 @@ diff --git a/testcases/tools/template.py b/testcases/tools/template.py
  _cofunc_syscall = libc.syscall
  _cofunc_syscall.restype = ctypes.c_long
  sys.dont_write_bytecode = True
-+EPT_TRACE_URL_PATH = "/tmp/cofunc-ept-trace-url"
++EPT_TRACE_URL_PATH = "/func/.cofunc-ept-trace-url"
  
  SYS_SC_SNAPSHOT       = 0x1000
  SYS_SC_PRINT_STAT     = 0x1001
