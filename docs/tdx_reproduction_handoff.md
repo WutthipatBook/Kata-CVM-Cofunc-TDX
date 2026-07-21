@@ -9285,3 +9285,44 @@ Prepared SHA-256:
 The next separately approved boundary is a root-only bpftrace compile/dry-run
 check. If and only if it passes, run one isolated address-aware DNA launch.
 Do not retry, sample, modify KVM/guest code, or run another workload.
+
+### Address-aware DNA attribution closes the private pre-fault question
+
+The root bpftrace dry-run passed, and the one approved address-aware DNA
+launch completed at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_170942`.
+The workload, trace, analyzer, evidence checks, pre/post safety gates, and
+runtime-source restoration all passed. There were no prohibited KVM/TDX
+markers, trace-loss records, or residual VM/container objects.
+
+All 505 authenticated handler-window EPT events are shared, not private. Each
+raw fault address contains the TDX shared alias bit
+`0x8000000000000`. Normalized addresses cover 505 contiguous, unique 4 KiB
+pages in `[0x600207000, 0x600400000)`, entirely within the 60 MiB shared
+prefix. Counts by range are:
+
+- Shared prefix: 505
+- Private pre-fault range: 0
+- Reserved tail: 0
+- Outside granted memory: 0
+
+The private pre-fault target therefore passes conclusively. The existing
+`prefault_target_passed=false` field is the intentionally stronger
+zero-faults-of-any-visibility predicate and remains false because of the
+shared-buffer events. Guest telemetry confirms 1,008,730,112 private bytes
+pre-faulted in 481 chunks with zero deferred accepts.
+
+The 505 shared events consumed 984,194 ns total (1,948.899 ns mean, 1,665 ns
+median), approximately 0.004617% of the 21.314546585-second guest handler.
+They retain the previous run's exact 250+255-page structure, now conclusively
+attributed to one contiguous shared-prefix interval.
+
+No further VM is required to establish the private result. A literal
+zero-all-EPT result would require a separately approved shared-prefix
+pre-touch experiment with explicit setup-cost and semantic validation. Do not
+describe the current result as a private pre-fault failure.
+
+Validation report:
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_170942/address_attribution_validation_report.md`
+(SHA-256
+`52eddd1217ed26096ca52e4c77301d0564c9bbdab4b62e65b1bb0545f8038f00`).

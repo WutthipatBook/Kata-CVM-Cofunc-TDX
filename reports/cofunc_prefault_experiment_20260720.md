@@ -654,3 +654,38 @@ Prepared SHA-256:
 
 The next boundary is a root-only bpftrace dry-run followed, only if it passes,
 by one isolated address-aware DNA launch. Do not retry or run Video again.
+
+## Address-aware DNA result: private pre-fault proven
+
+The approved address-aware DNA launch completed at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_170942`
+with `run_rc=0`, ready pre/post safety gates, exact runtime-source
+restoration, no trace loss, no prohibited KVM/TDX marker, and no residue.
+
+The authenticated gate again contained 505 EPT services, but their addresses
+resolve the previous ambiguity. Every record carries the 52-bit TDX shared-GPA
+alias mask `0x8000000000000`. After normalization, all 505 unique 4 KiB pages
+form the contiguous interval `[0x600207000, 0x600400000)`, wholly inside the
+60 MiB shared prefix `[0x600000000, 0x603c00000)`. There were zero events in
+the private pre-fault range `[0x603c00000, 0x63fe00000)`, zero in the 2 MiB
+reserved tail, and zero outside the granted 1 GiB slot.
+
+This is conclusive evidence that the 1,008,730,112-byte private pool was
+completely pre-faulted for handler execution. The broad
+`prefault_target_passed=false` flag means only that 505 shared-buffer faults
+remain; it must not be interpreted as a private pre-fault failure. Those
+faults consumed 984,194 ns total, or approximately 0.004617% of the
+21.314546585-second guest handler interval. Their error-code split is
+`0x1=250` and `0x2=255`, reproducing the earlier address-less run's exact
+250+255-page structure.
+
+The private-memory objective is complete. Making the analyzer's literal
+zero-all-EPT target pass would be a separate shared-memory experiment, likely
+pre-touching the observed shared-buffer interval before opening the handler
+gate. That change is not required for the private pre-fault conclusion and
+must separately account for setup cost and shared-buffer semantics.
+
+Validation report:
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_170942/address_attribution_validation_report.md`
+(SHA-256
+`52eddd1217ed26096ca52e4c77301d0564c9bbdab4b62e65b1bb0545f8038f00`).
