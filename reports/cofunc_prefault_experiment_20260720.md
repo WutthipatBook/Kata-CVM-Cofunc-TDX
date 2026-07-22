@@ -726,3 +726,43 @@ sudo -v && sudo /home/booklyn/cofunc-tdx/scripts/run_cofunc_prefault_fig11_measu
 ```
 
 No VM has been launched by preparing or testing this workflow.
+
+## Full handler-performance result
+
+The approved matrix completed successfully at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fig11_measurements_20260722_044805`.
+All 12 functions and 215 artifact-first-N samples passed without warm-up or
+retry. The harness, postflight gate, and evidence checks all returned zero;
+all 24 per-workload safety gates reported ready; prohibited kernel evidence
+was empty; and runtime, CVM source, build, and boot-artifact restoration
+matched the pre-run hashes.
+
+Private pre-faulting reduced mean handler time relative to the preserved
+on-demand CoFunc baseline for all nine Fig. 11 applications:
+
+| Application | On-demand s | Pre-fault s | Change |
+| --- | ---: | ---: | ---: |
+| Face detection | 1.5253 | 1.0637 | -30.26% |
+| Image processing | 10.1991 | 7.2784 | -28.64% |
+| Sentiment | 0.1490 | 0.1338 | -10.20% |
+| Video processing | 63.4352 | 52.7715 | -16.81% |
+| Compression | 2.2255 | 1.7790 | -20.06% |
+| DNA visualisation | 18.5973 | 18.2654 | -1.78% |
+| JS uploader | 0.5000 | 0.3697 | -26.07% |
+| JS thumbnailer | 0.4547 | 0.3167 | -30.36% |
+| Alexa chain | 0.5636 | 0.3031 | -46.21% |
+
+The unweighted geometric-mean speedup across the nine plotted applications is
+1.322x. Alexa is the sum of its four function handlers. The comparison uses
+`t_exec` only and therefore does not move pre-fault setup into handler time.
+Because the other three series come from the preserved July 17 matrix, this
+is a cross-run comparison rather than a same-day interleaved A/B.
+
+Primary outputs:
+
+- Handler JSON: `analysis/handler-comparison/cofunc_prefault_handler_comparison.json`
+  (SHA-256 `fcecbe09d8b4383090aedf963ba733844bb2a59d5afbf0566b89966fb9a79d97`)
+- Handler graph: `analysis/handler-comparison/cofunc_prefault_handler_comparison.png`
+  (SHA-256 `2719c73ea9e2b91626629c2f9da8aa4da9bfc03065917dcc6f477393688cf110`)
+- Stage JSON: `analysis/stages/cofunc_prefault_stage_breakdown.json`
+  (SHA-256 `856697a750e6d13b3b1b21a34ddf0035fc9cad40780278bdfcaf6af5783b700f`)

@@ -9365,3 +9365,28 @@ On 12/12 success, the run root contains:
 
 No VM was launched while implementing or offline-testing the harness and
 plotter.
+
+### CoFunc pre-fault Fig. 11 handler result
+
+The full matrix passed at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fig11_measurements_20260722_044805`:
+
+- 12/12 functions and 215/215 measured rows;
+- `run_rc=0`, `postflight_gate_rc=0`, and `evidence_rc=0`;
+- 24/24 per-workload host gates ready;
+- no prohibited KVM/TDX, log-loss, private-level-2, or private-2M evidence;
+- exact runtime-source, CVM-source, kernel-build, and ISO restoration.
+
+Compared with the preserved on-demand CoFunc handler means, private pre-fault
+improved all nine plotted applications. Reductions ranged from 1.78% for DNA
+to 46.21% for Alexa; the unweighted geometric-mean speedup was 1.322x. The
+complete per-application values are in
+`analysis/handler-comparison/cofunc_prefault_handler_comparison.md`.
+
+The generated graph is
+`analysis/handler-comparison/cofunc_prefault_handler_comparison.png`
+(SHA-256
+`2719c73ea9e2b91626629c2f9da8aa4da9bfc03065917dcc6f477393688cf110`).
+The comparison is based strictly on `t_exec`; Alexa sums its four handlers.
+The Native, on-demand CoFunc, and Vanilla Kata series are from the preserved
+July 17 matrix, so treat the result as cross-run rather than interleaved A/B.
