@@ -766,3 +766,34 @@ Primary outputs:
   (SHA-256 `2719c73ea9e2b91626629c2f9da8aa4da9bfc03065917dcc6f477393688cf110`)
 - Stage JSON: `analysis/stages/cofunc_prefault_stage_breakdown.json`
   (SHA-256 `856697a750e6d13b3b1b21a34ddf0035fc9cad40780278bdfcaf6af5783b700f`)
+
+## Prepared paired EPT fault-savings matrix
+
+The handler timing logs cannot directly provide a fault-savings count. The
+performance build deliberately removed the diagnostic first-level counter,
+and guest first-level faults are not the events private pre-faulting is meant
+to eliminate. Prior telemetry showed 680,115 DNA and 4,080,876 Video guest
+faults even with private pre-fault enabled.
+
+`scripts/run_cofunc_prefault_fault_savings.sh` therefore measures the relevant
+metric directly: host `kvm_page_fault` tracepoint events inside authenticated
+handler windows. It runs one deterministic launch for every Fig. 11 function
+with on-demand private backing and one with private pre-faulting. The reported
+faults saved are the paired difference `on-demand - pre-fault`.
+
+The count-only BPF program keeps per-window aggregate maps and emits no
+per-fault records, avoiding the trace-volume problem an on-demand workload
+would otherwise create. Python and JavaScript templates use stable sample IDs
+1 through 12. The harness checks paired EPT exit/fault/reentry counts, trace
+loss, all per-workload host gates and kernel deltas, and exact config/source/
+build/ISO restoration. It launches at most 24 CVMs, uses no retry, and stops
+on the first warning.
+
+Approved command:
+
+```bash
+sudo -v && /home/booklyn/cofunc-tdx/scripts/run_cofunc_prefault_fault_savings.sh
+```
+
+The harness performs a privileged bpftrace dry-run before launching the first
+VM. No VM was launched while preparing or offline-testing this experiment.

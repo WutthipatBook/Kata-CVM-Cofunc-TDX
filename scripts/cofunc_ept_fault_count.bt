@@ -1,0 +1,66 @@
+BEGIN
+{
+  @enabled = 0;
+  @window = 0;
+  printf("trace_status\tready\n");
+}
+
+tracepoint:syscalls:sys_enter_write
+/pid == $1 && str(args->buf) == "COFUNC_EPT_BEGIN"/
+{
+  @window = @window + 1;
+  @enabled = 1;
+  printf("trace_window\tbegin\t%llu\t%s\n", @window,
+         strftime("%s.%f", nsecs));
+}
+
+tracepoint:syscalls:sys_enter_write
+/pid == $1 && str(args->buf) == "COFUNC_EPT_END"/
+{
+  printf("trace_window\tend\t%llu\t%s\n", @window,
+         strftime("%s.%f", nsecs));
+  @enabled = 0;
+}
+
+tracepoint:kvm:kvm_exit
+/((args->exit_reason & 0xffff) == 48)/
+{
+  @vm_ept_exits[pid] = count();
+  @ept_exit_ns[tid] = nsecs;
+  if (@enabled) {
+    @window_ept_exits[@window] = count();
+    @ept_window[tid] = @window;
+  }
+}
+
+tracepoint:kvm:kvm_page_fault
+{
+  @vm_ept_faults[pid] = count();
+  if (@enabled) {
+    @window_ept_faults[@window] = count();
+    @window_error_code[@window, args->error_code] = count();
+  }
+}
+
+tracepoint:kvm:kvm_entry
+/@ept_exit_ns[tid] != 0/
+{
+  $duration = nsecs - @ept_exit_ns[tid];
+  @vm_service_count[pid] = count();
+  @vm_service_ns[pid] = sum($duration);
+  if (@ept_window[tid] != 0) {
+    @window_service_count[@ept_window[tid]] = count();
+    @window_service_ns[@ept_window[tid]] = sum($duration);
+  }
+  delete(@ept_window[tid]);
+  delete(@ept_exit_ns[tid]);
+}
+
+END
+{
+  clear(@enabled);
+  clear(@window);
+  clear(@ept_window);
+  clear(@ept_exit_ns);
+  printf("trace_status\tstopped\n");
+}

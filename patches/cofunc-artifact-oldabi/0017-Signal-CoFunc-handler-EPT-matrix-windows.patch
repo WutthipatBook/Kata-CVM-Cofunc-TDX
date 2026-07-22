@@ -1,0 +1,187 @@
+From: CoFunc TDX artifact reproduction <noreply@example.com>
+Date: Wed, 22 Jul 2026 08:00:00 +0000
+Subject: [PATCH] runtime: signal CoFunc handler EPT matrix windows
+
+Pass an authenticated host trace URL through the split-container rootfs and
+assign the twelve Fig. 11 functions stable sample IDs. Signal immediately
+around handler execution so one trace session can count all matrix windows.
+This patch is diagnostic-only and requires COFUNC_EPT_TRACE_URL at runtime.
+---
+ testcases/tools/lean_container/start.sh       | 33 +++++++++++++++++++++
+ testcases/tools/tasks/run_sc_fork/action.sh   |  1 +
+ testcases/tools/template.js                   | 31 +++++++++++++++++++
+ testcases/tools/template.py                   | 15 ++++++++++
+ 4 files changed, 80 insertions(+)
+
+diff --git a/testcases/tools/lean_container/start.sh b/testcases/tools/lean_container/start.sh
+--- a/testcases/tools/lean_container/start.sh
++++ b/testcases/tools/lean_container/start.sh
+@@ -16,6 +16,7 @@ tools=$(dirname $0)/..
+ mem_file="/dev/hugepages/split_container/${fn_name}_1"
+ regular_memfile="${COFUNC_OLDABI_REGULAR_MEMFILE:-0}"
+ regular_memfile_host=""
++trace_base_url="${COFUNC_EPT_TRACE_URL:-}"
+ 
+ cleanup_regular_memfile() {
+         if [[ -n ${regular_memfile_host:-} ]]; then
+@@ -39,6 +40,31 @@ if [[ $regular_memfile != 0 && $regular_memfile != 1 ]]; then
+         exit 1
+ fi
+ 
++if [[ -z $trace_base_url || $trace_base_url == *$'\n'* || $trace_base_url == *$'\r'* ]]; then
++        echo "COFUNC_EPT_TRACE_URL must be one non-empty line"
++        exit 1
++fi
++
++case "$fn_name" in
++fn_py_compression) trace_sample=1 ;;
++fn_py_face_detection) trace_sample=2 ;;
++fn_py_image_processing) trace_sample=3 ;;
++fn_py_sentiment) trace_sample=4 ;;
++fn_py_video_processing) trace_sample=5 ;;
++fn_py_dna_visualisation) trace_sample=6 ;;
++fn_js_thumbnailer) trace_sample=7 ;;
++fn_js_uploader) trace_sample=8 ;;
++fn_js_alexa_frontend) trace_sample=9 ;;
++fn_js_alexa_interact) trace_sample=10 ;;
++fn_js_alexa_smarthome) trace_sample=11 ;;
++fn_js_alexa_tv) trace_sample=12 ;;
++*)
++        echo "unsupported EPT matrix workload: $fn_name"
++        exit 1
++        ;;
++esac
++trace_url="${trace_base_url}/${trace_sample}"
++
+ if [[ $regular_memfile == 1 ]]; then
+         mem_file="/tmp/split_container/${fn_name}_1"
+ fi
+@@ -67,6 +92,13 @@ if [[ $regular_memfile == 1 ]]; then
+         trap cleanup_regular_memfile EXIT
+ fi
+ 
++trace_url_host=".rootfs/$name/func/.cofunc-ept-trace-url"
++if [[ ! -d $(dirname "$trace_url_host") ]]; then
++        echo "missing split-container function directory: $(dirname "$trace_url_host")"
++        exit 1
++fi
++(umask 077; printf '%s\n' "$trace_url" >"$trace_url_host")
++
+ # if [[ $result_log != "" ]]; then
+ #         echo "new test @ $(date)" >> $result_log
+ # fi
+diff --git a/testcases/tools/tasks/run_sc_fork/action.sh b/testcases/tools/tasks/run_sc_fork/action.sh
+--- a/testcases/tools/tasks/run_sc_fork/action.sh
++++ b/testcases/tools/tasks/run_sc_fork/action.sh
+@@ -47,5 +47,6 @@ $tools/sc-snapshot.sh
+ 
+ sudo env COFUNC_OLDABI_REGULAR_MEMFILE="${COFUNC_OLDABI_REGULAR_MEMFILE:-0}" \
++        COFUNC_EPT_TRACE_URL="${COFUNC_EPT_TRACE_URL:-}" \
+         $tools/lean_container/start.sh sc-fork $log_file $times
+ 
+ trap - EXIT
+diff --git a/testcases/tools/template.py b/testcases/tools/template.py
+--- a/testcases/tools/template.py
++++ b/testcases/tools/template.py
+@@ -4,6 +4,7 @@ libc = ctypes.CDLL(None)
+ _cofunc_syscall = libc.syscall
+ _cofunc_syscall.restype = ctypes.c_long
+ sys.dont_write_bytecode = True
++EPT_TRACE_URL_PATH = "/func/.cofunc-ept-trace-url"
+ 
+ SYS_SC_SNAPSHOT       = 0x1000
+ SYS_SC_PRINT_STAT     = 0x1001
+@@ -22,6 +23,18 @@ STAT_N_PGFAULT  = 0x9
+ STAT_TSC_HZ     = 0xa
+ 
+ 
++def fault_trace_signal(phase):
++    with open(EPT_TRACE_URL_PATH, encoding="ascii") as file:
++        base_url = file.read().strip()
++    if not base_url or "\n" in base_url or "\r" in base_url:
++        raise RuntimeError("invalid CoFunc EPT trace URL")
++    with urllib.request.urlopen(f"{base_url}/{phase}", timeout=30) as response:
++        if response.status != 204:
++            raise RuntimeError(
++                f"CoFunc EPT trace signal {phase} returned HTTP {response.status}"
++            )
++
++
+ def get_param(fn_name):
+     data = urllib.parse.urlencode({"fn_name": fn_name})
+     data = data.encode('ascii')
+@@ -77,6 +90,7 @@ with open("/func/execute.py") as file:
+     fn_code = file.read()
+ 
+ t_attest_after_import = _cofunc_syscall(SYS_SC_GET_STAT, STAT_T_ATTEST)
++fault_trace_signal("begin")
+ t_import_done = time.time()
+ 
+ t_network = 0
+@@ -108,6 +122,7 @@ n_pgfault_after_exec = _cofunc_syscall(SYS_SC_GET_STAT, STAT_N_PGFAULT)
+ # _cofunc_syscall(SYS_SC_DEFER_ENCRYPT, 0)
+ 
+ t_func_done = time.time()
++fault_trace_signal("end")
+ 
+ # _cofunc_syscall(SYS_SC_PRINT_STAT, b"func_done\0")
+ print(f"t_import_done {t_import_done}")
+diff --git a/testcases/tools/template.js b/testcases/tools/template.js
+--- a/testcases/tools/template.js
++++ b/testcases/tools/template.js
+@@ -35,7 +35,37 @@ const STAT_N_ACCEPT = 0x7;
+ const STAT_T_PGFAULT = 0x8;
+ const STAT_N_PGFAULT = 0x9;
+ const STAT_TSC_HZ = 0xa;
+ 
++const EPT_TRACE_URL_PATH = '/func/.cofunc-ept-trace-url';
++const EPT_TRACE_URL = __fs.readFileSync(EPT_TRACE_URL_PATH, 'utf8').trim();
++if (!EPT_TRACE_URL || /[\r\n]/.test(EPT_TRACE_URL)) {
++    throw new Error('invalid CoFunc EPT trace URL');
++}
++
++function FaultTraceSignal(phase) {
++    return new Promise(function(resolve, reject) {
++        request({
++            'url': EPT_TRACE_URL + '/' + phase,
++            'method': 'GET',
++            'timeout': 30000,
++        }, function(error, response) {
++            if (error) {
++                reject(error);
++                return;
++            }
++            if (!response || response.statusCode != 204) {
++                reject(new Error(
++                    `CoFunc EPT trace signal ${phase} returned HTTP ` +
++                    `${response ? response.statusCode : 'none'}`
++                ));
++                return;
++            }
++            resolve();
++        });
++    });
++}
++
++FaultTraceSignal('begin').then(() => {
+ t_attest_after_import = sc.stat_get_stat(0x3);
+ t_import_done = Date.now() / 1000;
+ 
+@@ -68,7 +98,8 @@ SendRequest('http://127.0.0.1:8888/get_param', {
+       n_accept_after_exec = sc.stat_get_stat(STAT_N_ACCEPT);
+       t_pgfault_after_exec = sc.stat_get_stat(STAT_T_PGFAULT);
+       n_pgfault_after_exec = sc.stat_get_stat(STAT_N_PGFAULT);
+       t_func_done = Date.now() / 1000;
++      FaultTraceSignal('end').then(() => {
+       console.log(`t_import_done ${t_import_done}`);
+       console.log(`t_func_done ${t_func_done}`);
+       if (n_hcalls_before_exec >= 0) {
+@@ -102,4 +133,6 @@ SendRequest('http://127.0.0.1:8888/get_param', {
+       }
++      })
+     })
+   })  
+ });
++});
+-- 
+2.43.0

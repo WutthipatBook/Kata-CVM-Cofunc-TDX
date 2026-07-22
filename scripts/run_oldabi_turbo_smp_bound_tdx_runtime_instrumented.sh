@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT="${ROOT:-/mnt/new_disk/cofunc_tdx_artifact}"
 BUNDLE="${BUNDLE:-/home/booklyn/cofunc-tdx}"
 RUNNER="$BUNDLE/scripts/run_oldabi_turbo_smp_bound_tdx_runtime_fig11.sh"
-CVM_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0006-Diagnostic-expose-guest-accept-pgfault-stats.patch"
+CVM_PATCH="${COFUNC_OLDABI_CVM_INSTRUMENTATION_PATCH:-$BUNDLE/patches/cofunc-artifact-oldabi/0006-Diagnostic-expose-guest-accept-pgfault-stats.patch}"
 RUNTIME_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0007-Diagnostic-emit-grant-accept-runtime-metrics.patch"
 RUNTIME_FOLLOWUP_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0012-Preserve-Python-syscall-binding-across-workload-exec.patch"
 RUNTIME_METRICS_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0014-Report-page-fault-count-and-calibrated-time.patch"

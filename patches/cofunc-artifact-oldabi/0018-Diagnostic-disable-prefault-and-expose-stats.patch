@@ -1,0 +1,56 @@
+From: CoFunc TDX artifact reproduction <noreply@example.com>
+Date: Wed, 22 Jul 2026 08:10:00 +0000
+Subject: [PATCH] split-container: trace on-demand fault baseline
+
+Temporarily disable private pre-faulting and expose the existing guest fault
+statistics needed by the handler-window trace template. The surrounding
+runner backs up and restores the config, source, build tree, and boot images.
+---
+ cvm_os/.config                                    |  2 +-
+ cvm_os/kernel/split-container/split_container.c | 14 ++++++++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/cvm_os/.config b/cvm_os/.config
+--- a/cvm_os/.config
++++ b/cvm_os/.config
+@@ -12,6 +12,6 @@ CHCORE_MINI:BOOL=OFF
+ CHCORE_SPLIT_CONTAINER:BOOL=ON
+ CHCORE_SPLIT_CONTAINER_HPAGE:BOOL=ON
+-CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=ON
++CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=OFF
+ CHCORE_SPLIT_CONTAINER_LIBTMPFS:BOOL=ON
+ CHCORE_SPLIT_CONTAINER_SYNC:BOOL=ON
+ CHCORE_KERNEL_DEBUG:BOOL=OFF
+diff --git a/cvm_os/kernel/split-container/split_container.c b/cvm_os/kernel/split-container/split_container.c
+--- a/cvm_os/kernel/split-container/split_container.c
++++ b/cvm_os/kernel/split-container/split_container.c
+@@ -546,6 +546,12 @@ long add_polling(cap_t pmo_cap)
+ #define STAT_N_COWS     0x2
+ #define STAT_T_GRANT    0x5
+ #define STAT_T_FORK     0x6
++/* CoFunc grant/accept stat instrumentation. */
++#define STAT_N_ACCEPT   0x7
++#define STAT_T_PGFAULT  0x8
++#define STAT_N_PGFAULT  0x9
++#define STAT_TSC_HZ     0xa
++
+ long get_stat(int stat)
+ {
+         switch (stat) {
+@@ -555,6 +561,14 @@ long get_stat(int stat)
+                 return current_cap_group->sc_n_cow;
+         case STAT_T_GRANT:
+                 return current_cap_group->sc_t_accept;
++        case STAT_N_ACCEPT:
++                return current_cap_group->sc_n_accept;
++        case STAT_T_PGFAULT:
++                return current_cap_group->sc_t_pgfault;
++        case STAT_N_PGFAULT:
++                return current_cap_group->sc_n_pgfault;
++        case STAT_TSC_HZ:
++                return cur_freq;
+         // case STAT_T_FORK:
+         //         return current_cap_group->sc_t_fork;
+         default:
+-- 
+2.43.0

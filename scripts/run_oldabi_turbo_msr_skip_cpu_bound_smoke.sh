@@ -9,6 +9,7 @@ CPU_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0002-Bound-old-ABI-SMP-startup
 FORCE_4K_ACCEPT_PATCH="$BUNDLE/patches/cofunc-artifact-oldabi/0005-Diagnostic-force-4K-split-container-accept.patch"
 EXTRA_CVM_PATCH="${COFUNC_OLDABI_CVM_EXTRA_PATCH:-}"
 RUNNER="$BUNDLE/scripts/run_oldabi_5_19_fig11.sh"
+CONFIG="$ARTIFACT/cvm_os/.config"
 TDX_C="$ARTIFACT/cvm_os/kernel/arch/x86_64/plat/intel_tdx/tdx.c"
 SMP_C="$ARTIFACT/cvm_os/kernel/arch/x86_64/machine/smp.c"
 MADT_C="$ARTIFACT/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c"
@@ -40,7 +41,7 @@ log() {
 
 hash_state() {
 	local path
-	for path in "$TDX_C" "$SMP_C" "$MADT_C" "$ACPI_H" "$SPLIT_C" \
+	for path in "$CONFIG" "$TDX_C" "$SMP_C" "$MADT_C" "$ACPI_H" "$SPLIT_C" \
 		"$SNAPSHOT_C" "$IRQ_C" "$CAP_GROUP_H" "$KERNEL_IMG" "$KERNEL_ISO" "$ISO"; do
 		[[ -e "$path" ]] && sha256sum "$path"
 	done
@@ -63,6 +64,7 @@ cleanup() {
 	set +e
 	if ((backup_done)); then
 		log "restoring old-ABI source and boot images"
+		cp -a "$BACKUP_DIR/config.before" "$CONFIG"
 		cp -a "$BACKUP_DIR/tdx.c.before" "$TDX_C"
 		cp -a "$BACKUP_DIR/smp.c.before" "$SMP_C"
 		cp -a "$BACKUP_DIR/madt.c.before" "$MADT_C"
@@ -104,6 +106,7 @@ main() {
 		[[ -f "$EXTRA_CVM_PATCH" ]] || die "missing extra CVM patch: $EXTRA_CVM_PATCH"
 	fi
 	[[ -x "$RUNNER" ]] || die "missing old-ABI runner: $RUNNER"
+	[[ -f "$CONFIG" ]] || die "missing CVM config: $CONFIG"
 	[[ -f "$TDX_C" ]] || die "missing TDX source: $TDX_C"
 	[[ -f "$SMP_C" ]] || die "missing SMP source: $SMP_C"
 	[[ -f "$MADT_C" ]] || die "missing MADT source: $MADT_C"
@@ -120,6 +123,7 @@ main() {
 
 	ensure_rw
 	mkdir -p "$BACKUP_DIR"
+	cp -a "$CONFIG" "$BACKUP_DIR/config.before"
 	cp -a "$TDX_C" "$BACKUP_DIR/tdx.c.before"
 	cp -a "$SMP_C" "$BACKUP_DIR/smp.c.before"
 	cp -a "$MADT_C" "$BACKUP_DIR/madt.c.before"

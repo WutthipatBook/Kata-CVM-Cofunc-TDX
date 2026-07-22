@@ -9390,3 +9390,26 @@ The generated graph is
 The comparison is based strictly on `t_exec`; Alexa sums its four handlers.
 The Native, on-demand CoFunc, and Vanilla Kata series are from the preserved
 July 17 matrix, so treat the result as cross-run rather than interleaved A/B.
+
+### Prepared paired CoFunc EPT fault-savings matrix
+
+The performance matrix does not contain a fault counter, and guest
+first-level faults are not equivalent to host EPT faults. Use the bounded
+paired diagnostic instead of inferring counts from handler time:
+
+```bash
+sudo -v && /home/booklyn/cofunc-tdx/scripts/run_cofunc_prefault_fault_savings.sh
+```
+
+It runs one on-demand and one pre-fault launch for each of the 12 Fig. 11
+functions, with no retry. A count-only BPF program aggregates authenticated
+handler-window `kvm_page_fault` events without per-event output. The analyzer
+reports per-function and Fig. 11 application totals; Alexa is the sum of its
+four function windows. `EPT faults saved` is strictly
+`on-demand handler EPT faults - pre-fault handler EPT faults`.
+
+The harness hard-stops on a failed root bpftrace dry-run, trace loss, unpaired
+EPT lifecycle count, failed workload, unsafe host gate, kernel warning,
+private level-2 mapping, private 2 MiB promotion, or restoration mismatch.
+The maximum boundary is 24 CVMs. No VM was launched during implementation or
+offline testing.

@@ -11,6 +11,7 @@ RUNTIME_EXTRA_PATCH="${COFUNC_OLDABI_RUNTIME_EXTRA_PATCH:-}"
 RUNTIME_FOLLOWUP_PATCH="${COFUNC_OLDABI_RUNTIME_FOLLOWUP_PATCH:-}"
 RUNTIME_METRICS_PATCH="${COFUNC_OLDABI_RUNTIME_METRICS_PATCH:-}"
 RUNTIME_TRACE_PATCH="${COFUNC_OLDABI_RUNTIME_TRACE_PATCH:-}"
+RUNTIME_TRACE_MATRIX="${COFUNC_OLDABI_RUNTIME_TRACE_MATRIX:-0}"
 CPU_SMOKE="$BUNDLE/scripts/run_oldabi_turbo_msr_skip_cpu_bound_smoke.sh"
 DEFAULT_WORKLOAD="fn_py_face_detection"
 TOOLS="$ARTIFACT/testcases/tools"
@@ -32,7 +33,7 @@ if [[ $STOP_AFTER_SMOKE_VALUE == 0 ]]; then
 fi
 OUT="${OUT:-$ROOT/results/oldabi_5_19_turbo_smp_bound_tdx_runtime_${OUT_KIND}_$STAMP}"
 IMAGE_TAG_BACKUP="pre-oldabi-tdx-runtime-$STAMP"
-RUNTIME_EXTRA_MARKERS='CoFunc grant/accept stat instrumentation|sc_host_grant_total_ns|STAT_N_ACCEPT|n_accept_exec|t_pgfault_exec|STAT_N_PGFAULT|n_pgfault_exec|sc_guest_tsc_hz|fault_trace_signal|COFUNC_EPT_TRACE_URL'
+RUNTIME_EXTRA_MARKERS='CoFunc grant/accept stat instrumentation|sc_host_grant_total_ns|STAT_N_ACCEPT|n_accept_exec|t_pgfault_exec|STAT_N_PGFAULT|n_pgfault_exec|sc_guest_tsc_hz|fault_trace_signal|FaultTraceSignal|COFUNC_EPT_TRACE_URL'
 backup_done=0
 SELECTED_WORKLOADS=()
 DOCKER_BUILD_CACHE_ARGS=()
@@ -268,6 +269,11 @@ main() {
 		|| die "STOP_AFTER_SMOKE must be 0 or 1, got $STOP_AFTER_SMOKE_VALUE"
 	[[ $SKIP_FACE_SMOKE_VALUE == 0 || $SKIP_FACE_SMOKE_VALUE == 1 ]] \
 		|| die "COFUNC_OLDABI_SKIP_FACE_SMOKE must be 0 or 1, got $SKIP_FACE_SMOKE_VALUE"
+	[[ $RUNTIME_TRACE_MATRIX == 0 || $RUNTIME_TRACE_MATRIX == 1 ]] \
+		|| die "COFUNC_OLDABI_RUNTIME_TRACE_MATRIX must be 0 or 1, got $RUNTIME_TRACE_MATRIX"
+	if [[ $RUNTIME_TRACE_MATRIX == 1 && -z $RUNTIME_TRACE_PATCH ]]; then
+		die "runtime trace matrix mode requires a trace patch"
+	fi
 
 	if [[ $STOP_AFTER_SMOKE_VALUE == 1 ]]; then
 		SELECTED_WORKLOADS=("${COFUNC_OLDABI_RUNTIME_WORKLOAD:-$DEFAULT_WORKLOAD}")
@@ -300,8 +306,10 @@ main() {
 		[[ -d "$dir" ]] || die "missing workload dir: $dir"
 	done
 	if [[ -n $RUNTIME_TRACE_PATCH ]]; then
-		[[ ${#SELECTED_WORKLOADS[@]} -eq 1 ]] \
-			|| die "runtime trace patch requires exactly one selected workload"
+		if [[ $RUNTIME_TRACE_MATRIX == 0 ]]; then
+			[[ ${#SELECTED_WORKLOADS[@]} -eq 1 ]] \
+				|| die "runtime trace patch requires exactly one selected workload"
+		fi
 		[[ $SKIP_FACE_SMOKE_VALUE == 1 ]] \
 			|| die "runtime trace patch requires COFUNC_OLDABI_SKIP_FACE_SMOKE=1"
 		[[ $RUNTIME_REPETITIONS == 1 ]] \
@@ -333,6 +341,7 @@ main() {
 		printf 'cofunc_oldabi_runtime_followup_patch=%s\n' "$RUNTIME_FOLLOWUP_PATCH"
 		printf 'cofunc_oldabi_runtime_metrics_patch=%s\n' "$RUNTIME_METRICS_PATCH"
 		printf 'cofunc_oldabi_runtime_trace_patch=%s\n' "$RUNTIME_TRACE_PATCH"
+		printf 'cofunc_oldabi_runtime_trace_matrix=%s\n' "$RUNTIME_TRACE_MATRIX"
 		printf 'cofunc_oldabi_skip_face_smoke=%s\n' "$SKIP_FACE_SMOKE_VALUE"
 		printf 'cofunc_oldabi_regular_memfile=%s\n' "${COFUNC_OLDABI_REGULAR_MEMFILE:-0}"
 		printf 'docker_build_cache_args=%s\n' "${DOCKER_BUILD_CACHE_ARGS[*]}"
@@ -384,6 +393,10 @@ main() {
 					|| die "runtime trace patch did not add Python trace signaling"
 				rg -q 'EPT_TRACE_URL_PATH = "/func/\.cofunc-ept-trace-url"' "$TEMPLATE_PY" \
 					|| die "runtime trace patch did not use the split-visible function path"
+				if [[ $RUNTIME_TRACE_MATRIX == 1 ]]; then
+					rg -q '^function FaultTraceSignal\(phase\) \{$' "$TEMPLATE_JS" \
+						|| die "runtime trace matrix patch did not add JS trace signaling"
+				fi
 				rg -q 'trace_url_host="\.rootfs/\$name/func/\.cofunc-ept-trace-url"' "$LEAN_START_SH" \
 					|| die "runtime trace patch did not populate the exported function rootfs"
 				rg -q 'COFUNC_EPT_TRACE_URL' "$ACTION_SH" "$LEAN_START_SH" \
@@ -432,9 +445,18 @@ main() {
 				|| die "rebuilt $image image does not contain guest stat template instrumentation"
 		fi
 		if [[ -n $RUNTIME_TRACE_PATCH ]]; then
-			docker run --rm "$image:latest" sh -c \
-				'grep -Fq '\''fault_trace_signal("begin")'\'' /func/main.py && grep -Fq '\''EPT_TRACE_URL_PATH = "/func/.cofunc-ept-trace-url"'\'' /func/main.py' \
-				|| die "rebuilt $image image does not contain handler trace signaling"
+			case "$workload" in
+			fn_js_*|chain_js_*)
+				docker run --rm "$image:latest" sh -c \
+					'grep -Fq "FaultTraceSignal" /func/main.js && grep -Fq ".cofunc-ept-trace-url" /func/main.js' \
+					|| die "rebuilt $image image does not contain JS handler trace signaling"
+				;;
+			*)
+				docker run --rm "$image:latest" sh -c \
+					'grep -Fq '\''fault_trace_signal("begin")'\'' /func/main.py && grep -Fq '\''EPT_TRACE_URL_PATH = "/func/.cofunc-ept-trace-url"'\'' /func/main.py' \
+					|| die "rebuilt $image image does not contain Python handler trace signaling"
+				;;
+			esac
 		fi
 		verify_workload_image "$workload" "$image"
 			docker image inspect "$image:latest" --format '{{.Id}} {{.Created}}' \
