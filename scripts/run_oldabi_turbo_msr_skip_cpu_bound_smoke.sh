@@ -14,16 +14,15 @@ SMP_C="$ARTIFACT/cvm_os/kernel/arch/x86_64/machine/smp.c"
 MADT_C="$ARTIFACT/cvm_os/kernel/arch/x86_64/drivers/acpi/madt.c"
 ACPI_H="$ARTIFACT/cvm_os/kernel/include/arch/x86_64/arch/drivers/acpi.h"
 SPLIT_C="$ARTIFACT/cvm_os/kernel/split-container/split_container.c"
+SNAPSHOT_C="$ARTIFACT/cvm_os/kernel/split-container/snapshot.c"
+IRQ_C="$ARTIFACT/cvm_os/kernel/arch/x86_64/irq/irq_entry.c"
+CAP_GROUP_H="$ARTIFACT/cvm_os/kernel/include/object/cap_group.h"
 ISO="$ARTIFACT/cvm_os/build/chcore.iso"
 KERNEL_BUILD="$ARTIFACT/cvm_os/build/kernel"
 KERNEL_IMG="$KERNEL_BUILD/kernel.img"
 KERNEL_ISO="$KERNEL_BUILD/arch/x86_64/boot/intel_tdx/chcore.iso"
-TDX_OBJ="$KERNEL_BUILD/CMakeFiles/kernel.img.dir/arch/x86_64/plat/intel_tdx/tdx.c.obj"
-SMP_OBJ="$KERNEL_BUILD/CMakeFiles/kernel.img.dir/arch/x86_64/machine/smp.c.obj"
-MADT_OBJ="$KERNEL_BUILD/CMakeFiles/kernel.img.dir/arch/x86_64/drivers/acpi/madt.c.obj"
-SPLIT_OBJ="$KERNEL_BUILD/CMakeFiles/kernel.img.dir/split-container/split_container.c.obj"
 STAMP="$(date -u +%Y%m%d_%H%M%S)"
-BACKUP_DIR="$BUNDLE/backups/oldabi-turbo-smp-bound-$STAMP"
+BACKUP_DIR="${COFUNC_OLDABI_CVM_BACKUP_DIR:-$BUNDLE/backups/oldabi-turbo-smp-bound-$STAMP}"
 OUT="${OUT:-$ROOT/results/oldabi_5_19_turbo_smp_bound_smoke_$STAMP}"
 STOP_AFTER_SMOKE_VALUE="${STOP_AFTER_SMOKE:-1}"
 FORCE_4K_ACCEPT_VALUE="${COFUNC_OLDABI_FORCE_4K_ACCEPT:-0}"
@@ -41,7 +40,8 @@ log() {
 
 hash_state() {
 	local path
-	for path in "$TDX_C" "$SMP_C" "$MADT_C" "$ACPI_H" "$SPLIT_C" "$KERNEL_IMG" "$KERNEL_ISO" "$ISO"; do
+	for path in "$TDX_C" "$SMP_C" "$MADT_C" "$ACPI_H" "$SPLIT_C" \
+		"$SNAPSHOT_C" "$IRQ_C" "$CAP_GROUP_H" "$KERNEL_IMG" "$KERNEL_ISO" "$ISO"; do
 		[[ -e "$path" ]] && sha256sum "$path"
 	done
 }
@@ -68,6 +68,15 @@ cleanup() {
 		cp -a "$BACKUP_DIR/madt.c.before" "$MADT_C"
 		cp -a "$BACKUP_DIR/acpi.h.before" "$ACPI_H"
 		cp -a "$BACKUP_DIR/split_container.c.before" "$SPLIT_C"
+		cp -a "$BACKUP_DIR/snapshot.c.before" "$SNAPSHOT_C"
+		cp -a "$BACKUP_DIR/irq_entry.c.before" "$IRQ_C"
+		cp -a "$BACKUP_DIR/cap_group.h.before" "$CAP_GROUP_H"
+		# An optional CVM patch may alter headers or sources outside the fixed
+		# diagnostic set. Drop all kernel objects so none can outlive restored
+		# source with a newer timestamp.
+		cmake --build "$KERNEL_BUILD" --target clean \
+			>"$BACKUP_DIR/build-clean.log" 2>&1
+		printf '%d\n' "$?" >"$BACKUP_DIR/build-clean.rc"
 		[[ -f "$BACKUP_DIR/kernel.img.before" ]] && cp -a "$BACKUP_DIR/kernel.img.before" "$KERNEL_IMG"
 		if [[ -f "$BACKUP_DIR/kernel-chcore.iso.before" ]]; then
 			cp -a "$BACKUP_DIR/kernel-chcore.iso.before" "$KERNEL_ISO"
@@ -75,9 +84,9 @@ cleanup() {
 			rm -f "$KERNEL_ISO"
 		fi
 		[[ -f "$BACKUP_DIR/chcore.iso.before" ]] && cp -a "$BACKUP_DIR/chcore.iso.before" "$ISO"
-		rm -f "$TDX_OBJ" "$SMP_OBJ" "$MADT_OBJ" "$SPLIT_OBJ"
 		hash_state >"$BACKUP_DIR/sha256.restored"
-		if rg -q "$DIAG_MARKERS" "$TDX_C" "$SMP_C" "$MADT_C" "$ACPI_H" "$SPLIT_C"; then
+		if rg -q "$DIAG_MARKERS" "$TDX_C" "$SMP_C" "$MADT_C" "$ACPI_H" \
+			"$SPLIT_C" "$SNAPSHOT_C" "$IRQ_C" "$CAP_GROUP_H"; then
 			log "warning: diagnostic marker still present after restore"
 		fi
 		log "restore evidence: $BACKUP_DIR"
@@ -100,6 +109,9 @@ main() {
 	[[ -f "$MADT_C" ]] || die "missing MADT source: $MADT_C"
 	[[ -f "$ACPI_H" ]] || die "missing ACPI header: $ACPI_H"
 	[[ -f "$SPLIT_C" ]] || die "missing split-container source: $SPLIT_C"
+	[[ -f "$SNAPSHOT_C" ]] || die "missing snapshot source: $SNAPSHOT_C"
+	[[ -f "$IRQ_C" ]] || die "missing IRQ source: $IRQ_C"
+	[[ -f "$CAP_GROUP_H" ]] || die "missing cap-group header: $CAP_GROUP_H"
 	[[ -d "$KERNEL_BUILD" ]] || die "missing kernel build dir: $KERNEL_BUILD"
 	[[ -f "$KERNEL_IMG" ]] || die "missing kernel image: $KERNEL_IMG"
 	[[ -f "$ISO" ]] || die "missing runtime ISO: $ISO"
@@ -113,6 +125,9 @@ main() {
 	cp -a "$MADT_C" "$BACKUP_DIR/madt.c.before"
 	cp -a "$ACPI_H" "$BACKUP_DIR/acpi.h.before"
 	cp -a "$SPLIT_C" "$BACKUP_DIR/split_container.c.before"
+	cp -a "$SNAPSHOT_C" "$BACKUP_DIR/snapshot.c.before"
+	cp -a "$IRQ_C" "$BACKUP_DIR/irq_entry.c.before"
+	cp -a "$CAP_GROUP_H" "$BACKUP_DIR/cap_group.h.before"
 	cp -a "$KERNEL_IMG" "$BACKUP_DIR/kernel.img.before"
 	[[ -f "$KERNEL_ISO" ]] && cp -a "$KERNEL_ISO" "$BACKUP_DIR/kernel-chcore.iso.before"
 	cp -a "$ISO" "$BACKUP_DIR/chcore.iso.before"
@@ -143,7 +158,8 @@ main() {
 	fi
 
 	log "removing stale old-ABI build outputs"
-	rm -f "$TDX_OBJ" "$SMP_OBJ" "$MADT_OBJ" "$SPLIT_OBJ" "$KERNEL_IMG" "$KERNEL_ISO" "$ISO"
+	cmake --build "$KERNEL_BUILD" --target clean
+	rm -f "$KERNEL_IMG" "$KERNEL_ISO" "$ISO"
 
 	log "building old-ABI ChCore ISO with WRMSR skip and SMP CPU-count bound"
 	(

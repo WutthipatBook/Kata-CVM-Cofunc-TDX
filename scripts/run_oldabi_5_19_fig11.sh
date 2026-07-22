@@ -20,7 +20,15 @@ TDX_SMP="${COFUNC_TDX_SMP:-16}"
 KVM_BUSY_RETRIES="${COFUNC_KVM_BUSY_RETRIES:-3}"
 KVM_BUSY_COOLDOWN_SEC="${COFUNC_KVM_BUSY_COOLDOWN_SEC:-20}"
 RUNTIME_REPETITIONS="${COFUNC_OLDABI_RUNTIME_REPETITIONS:-}"
+HOST_SAFETY_GATE="${COFUNC_HOST_SAFETY_GATE:-}"
+KERNEL_GUARD="${COFUNC_KERNEL_GUARD:-0}"
+SAFETY_DIR="$OUT/safety"
 RUN_START_EPOCH=""
+
+KERNEL_STOP_RE='BUG: Bad page state|TDH_MEM_RANGE_UNBLOCK.*failed|TDH_PHYMEM_PAGE_RECLAIM.*failed|TDX_TD_ASSOCIATED_PAGES_EXIST|TDX_PAGE_METADATA_INCORRECT|TDX_EPT_WALK_FAILED|tdx_sept_zap_private_spte|tdx_reclaim_page|WARNING:.*\[kvm(_intel)?\]'
+LOG_LOSS_RE='/dev/kmsg buffer overrun, some messages lost|Missed [0-9]+ kernel messages|[Ll]ost [0-9]+ kernel messages|messages dropped'
+LEVEL2_RE='CoFunc old-ABI TDX SEPT change:.*level=[2-9]|changed-live-split.*level=[2-9]|CoFunc TDX SEPT private lifecycle:.*level=[2-9]|CoFunc (old-ABI )?private TDP.*(level|iter_level|goal|req)=2|CoFunc TDX private TDP.*(level|iter_level)=2'
+PROMOTION_RE='CoFunc old-ABI private 2M promotion|CoFunc.*private.*2M.*promot|CoFunc.*2M.*promot.*private'
 
 FIG11_WORKLOADS=(
 	"fn_py_compression"
@@ -105,10 +113,74 @@ require_paths() {
 	[[ $TDX_SMP =~ ^[0-9]+$ && $TDX_SMP -gt 0 ]] || die "invalid COFUNC_TDX_SMP=$TDX_SMP"
 	[[ $KVM_BUSY_RETRIES =~ ^[0-9]+$ && $KVM_BUSY_RETRIES -gt 0 ]] || die "invalid COFUNC_KVM_BUSY_RETRIES=$KVM_BUSY_RETRIES"
 	[[ $KVM_BUSY_COOLDOWN_SEC =~ ^[0-9]+$ ]] || die "invalid COFUNC_KVM_BUSY_COOLDOWN_SEC=$KVM_BUSY_COOLDOWN_SEC"
+	[[ $KERNEL_GUARD == 0 || $KERNEL_GUARD == 1 ]] \
+		|| die "COFUNC_KERNEL_GUARD must be 0 or 1, got $KERNEL_GUARD"
+	if [[ -n $HOST_SAFETY_GATE ]]; then
+		[[ -x $HOST_SAFETY_GATE ]] || die "host safety gate is not executable: $HOST_SAFETY_GATE"
+	fi
 	if [[ -n $RUNTIME_REPETITIONS ]]; then
 		[[ $RUNTIME_REPETITIONS =~ ^[0-9]+$ && $RUNTIME_REPETITIONS -gt 0 ]] \
 			|| die "invalid COFUNC_OLDABI_RUNTIME_REPETITIONS=$RUNTIME_REPETITIONS"
 	fi
+}
+
+safe_label() {
+	printf '%s' "$1" | tr '/' '_'
+}
+
+run_host_safety_gate() {
+	local label=$1 log_file
+	[[ -n $HOST_SAFETY_GATE ]] || return 0
+	log_file="$SAFETY_DIR/host-$label.log"
+	if "$HOST_SAFETY_GATE" "$label" >"$log_file" 2>&1; then
+		cat "$log_file"
+	else
+		cat "$log_file" >&2
+		die "host safety gate failed: $label"
+	fi
+	rg -q '^host_safety=ready$' "$log_file" \
+		|| die "host safety gate did not report ready: $label"
+}
+
+capture_guard_dmesg() {
+	local label=$1
+	dmesg --time-format iso >"$SAFETY_DIR/dmesg-$label.log"
+}
+
+check_kernel_delta() {
+	local label=$1 before=$2 after=$3 delta match_re
+	delta="$SAFETY_DIR/dmesg-$label.delta"
+	{ diff -u "$before" "$after" 2>/dev/null || true; } \
+		| sed -n '/^+[^+]/p' >"$delta"
+	match_re="$KERNEL_STOP_RE|$LOG_LOSS_RE|$LEVEL2_RE|$PROMOTION_RE"
+	if rg -n -i "$match_re" "$delta" >"$SAFETY_DIR/$label-prohibited.txt"; then
+		cat "$SAFETY_DIR/$label-prohibited.txt" >&2
+		die "kernel safety evidence failed after $label"
+	fi
+	: >"$SAFETY_DIR/$label-prohibited.txt"
+}
+
+run_guarded_action() {
+	local fn=$1 times=$2 log_root=$3 phase=$4 safe rc before after
+	safe="$(safe_label "$phase-$fn")"
+	run_host_safety_gate "before-$safe"
+	if [[ $KERNEL_GUARD == 1 ]]; then
+		capture_guard_dmesg "$safe-before"
+		before="$SAFETY_DIR/dmesg-$safe-before.log"
+	fi
+	if run_action "$fn" "$times" "$log_root"; then
+		rc=0
+	else
+		rc=$?
+	fi
+	cleanup_cvm_state
+	if [[ $KERNEL_GUARD == 1 ]]; then
+		capture_guard_dmesg "$safe-after"
+		after="$SAFETY_DIR/dmesg-$safe-after.log"
+		check_kernel_delta "$safe" "$before" "$after"
+	fi
+	run_host_safety_gate "after-$safe"
+	(( rc == 0 )) || return "$rc"
 }
 
 write_selected_params() {
@@ -208,7 +280,7 @@ main() {
 	ensure_mount_rw
 	require_paths
 
-	mkdir -p "$OUT" "$LOG_DIR" "$SMOKE_LOG_DIR" "$TRACE_ROOT"
+	mkdir -p "$OUT" "$LOG_DIR" "$SMOKE_LOG_DIR" "$TRACE_ROOT" "$SAFETY_DIR"
 	RUN_START_EPOCH="$(date -u +%s)"
 	{
 		echo "run_start_epoch=$RUN_START_EPOCH"
@@ -232,6 +304,8 @@ main() {
 		echo "kvm_busy_retries=$KVM_BUSY_RETRIES"
 		echo "kvm_busy_cooldown_sec=$KVM_BUSY_COOLDOWN_SEC"
 		echo "runtime_repetitions=${RUNTIME_REPETITIONS:-default}"
+		echo "host_safety_gate=${HOST_SAFETY_GATE:-disabled}"
+		echo "kernel_guard=$KERNEL_GUARD"
 		echo "thp_enabled=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true)"
 		echo "thp_defrag=$(cat /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true)"
 		printf 'selected_workloads='
@@ -246,7 +320,7 @@ main() {
 
 	if [[ $SKIP_FACE_SMOKE == 0 ]]; then
 		log "smoke: fn_py_face_detection x1"
-		run_action "fn_py_face_detection" 1 "$SMOKE_LOG_DIR"
+		run_guarded_action "fn_py_face_detection" 1 "$SMOKE_LOG_DIR" smoke
 		"$SUMMARY_TOOL" "$SMOKE_LOG_DIR" --expected "$OUT/fig11_expected.txt" | tee "$OUT/smoke-summary.txt"
 	else
 		log "COFUNC_OLDABI_SKIP_FACE_SMOKE=1, skipping mandatory face-detection smoke"
@@ -259,7 +333,7 @@ main() {
 
 	while read -r fn times; do
 		[[ -n ${fn:-} ]] || continue
-		run_action "$fn" "$times" "$LOG_DIR"
+		run_guarded_action "$fn" "$times" "$LOG_DIR" measured
 	done <"$OUT/run_sc_fork.params"
 
 	"$SUMMARY_TOOL" "$LOG_DIR" --expected "$OUT/fig11_expected.txt" | tee "$OUT/tdx_sc_fork_summary.txt"

@@ -689,3 +689,40 @@ Validation report:
 `/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_170942/address_attribution_validation_report.md`
 (SHA-256
 `52eddd1217ed26096ca52e4c77301d0564c9bbdab4b62e65b1bb0545f8038f00`).
+
+## Prepared full handler-performance collection
+
+`scripts/run_cofunc_prefault_fig11_measurements.sh` now defines the bounded
+performance boundary needed to evaluate handler time across all Fig. 11
+workloads. It uses the artifact's exact first-N counts: 20 samples for ten
+functions, 10 for DNA, and 5 for Video. There is no discarded warm-up,
+automatic retry, bpftrace, or runtime telemetry.
+
+DNA and Video are intentionally recollected. Their preserved pre-fault runs
+are one-shot diagnostics with guest counters or host tracing and cannot be
+mixed with a homogeneous performance matrix.
+
+The current guest source retains patch 0013's atomic first-level fault
+counter. The performance runner temporarily applies patch 0016 while building
+the run ISO, restoring the artifact's original non-atomic fault-cycle
+accounting and removing the extra per-fault atomic count. Source and both ISO
+hash sets must match exactly after the nested runner restores them.
+
+The lower Fig. 11 runner now supports optional per-workload host gates and
+kernel deltas. This collection enables both, sets KVM retries to one, and
+stops before the next workload on any safety-gate failure, KVM/TDX warning,
+kernel-log loss, private level-2 mapping, or private 2 MiB promotion.
+
+After 12/12 workloads pass, the harness verifies all 215 analyzer records,
+generates a CoFunc pre-fault stage breakdown, and produces a four-way handler
+graph comparing Native, on-demand CoFunc, pre-fault CoFunc, and Vanilla Kata
+TDX. The graph uses `t_exec` only; pre-fault setup remains visible separately
+in the stage data and is not hidden in handler time.
+
+Approved command:
+
+```bash
+sudo -v && sudo /home/booklyn/cofunc-tdx/scripts/run_cofunc_prefault_fig11_measurements.sh
+```
+
+No VM has been launched by preparing or testing this workflow.

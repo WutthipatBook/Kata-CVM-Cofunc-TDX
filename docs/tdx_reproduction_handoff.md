@@ -9326,3 +9326,42 @@ Validation report:
 `/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_ept_fn_py_dna_visualisation_20260721_170942/address_attribution_validation_report.md`
 (SHA-256
 `52eddd1217ed26096ca52e4c77301d0564c9bbdab4b62e65b1bb0545f8038f00`).
+
+### Prepared CoFunc pre-fault Fig. 11 handler collection
+
+The next approved runtime boundary is the complete, performance-grade CoFunc
+pre-fault matrix. The entry point is:
+
+```bash
+sudo -v && sudo /home/booklyn/cofunc-tdx/scripts/run_cofunc_prefault_fig11_measurements.sh
+```
+
+This is one bounded matrix, not a diagnostic trace. It collects the released
+artifact's exact first-N sample counts with no warm-up or retry: 20 samples
+for all functions except DNA (10) and Video (5). DNA and Video must be
+recollected because their existing pre-fault records were generated under
+diagnostic instrumentation and are not aggregation-grade.
+
+The harness requires private pre-fault in the source and linked ISO, disables
+bpftrace and runtime telemetry, and temporarily applies patch 0016 to restore
+the artifact's original non-atomic first-level fault accounting for the
+performance build. The surrounding nested runner must restore source files,
+Docker tags, and both guest ISOs exactly.
+
+Every workload has a full host-safety gate and kernel-log delta before the
+next CVM is permitted. KVM boot retries are set to one. Any KVM/TDX warning,
+kernel-log loss, private level-2 mapping, private 2 MiB promotion, failed
+sample, missing pre-fault marker, or restoration mismatch hard-stops the
+matrix without advancing.
+
+On 12/12 success, the run root contains:
+
+- 215 validated `sc_fork.log` rows in the established artifact layout;
+- a CoFunc pre-fault stage breakdown in `analysis/stages`;
+- PNG/PDF/CSV/JSON/Markdown handler comparisons in
+  `analysis/handler-comparison`;
+- Native, on-demand CoFunc, pre-fault CoFunc, and Vanilla Kata TDX series;
+- top-level and per-workload safety evidence.
+
+No VM was launched while implementing or offline-testing the harness and
+plotter.
