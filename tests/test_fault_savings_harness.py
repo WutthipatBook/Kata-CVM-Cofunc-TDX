@@ -170,6 +170,25 @@ class FaultSavingsHarnessTest(unittest.TestCase):
             harness,
         )
 
+    def test_thumbnail_probe_is_bounded_and_preserves_matrix_semantics(self):
+        probe = (
+            ROOT / "scripts/run_cofunc_on_demand_thumbnail_probe.sh"
+        ).read_text()
+        self.assertIn("COFUNC_OLDABI_CVM_INSTRUMENTATION_PATCH", probe)
+        self.assertIn("ON_DEMAND_CVM_PATCH", probe)
+        self.assertIn("COFUNC_OLDABI_RUNTIME_TRACE_MATRIX=1", probe)
+        self.assertIn("COFUNC_OLDABI_RUNTIME_WORKLOADS=fn_js_thumbnailer", probe)
+        self.assertIn("COFUNC_OLDABI_RUNTIME_REPETITIONS=1", probe)
+        self.assertIn("COFUNC_KVM_BUSY_RETRIES=1", probe)
+        self.assertIn("PROBE_TIMEOUT_SEC=${PROBE_TIMEOUT_SEC:-180}", probe)
+        self.assertIn("clock-assertion-reproduced", probe)
+        self.assertIn("signal_begin_count", probe)
+        self.assertIn("$3 == 7", probe)
+        self.assertIn("compiled-prefault-mode", probe)
+        self.assertIn("source-state-before.sha256", probe)
+        self.assertIn("source-state-after.sha256", probe)
+        self.assertIn("post-cofunc-on-demand-thumbnail-probe", probe)
+
 
 if __name__ == "__main__":
     unittest.main()

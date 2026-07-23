@@ -9509,3 +9509,47 @@ stopped before any VM because `verify_mode()` used a dependent variable in a
 single `local` declaration under `set -u`. The postflight gate was ready and
 evidence checks passed. Both affected declarations are split and covered by a
 regression test; use the same command above.
+
+### True on-demand partial result and Thumbnailer clock failure
+
+The corrected reuse run at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_050810`
+proved that its diagnostic kernel was compiled with private pre-fault OFF.
+Its first six Python workloads completed one authenticated handler window
+each. The trace has six ordered begin/end pairs, 84 VM aggregate records, no
+loss, and paired EPT exit/fault/service counts for all six windows. All
+per-workload gates and kernel deltas were clean.
+
+The seventh workload, `fn_js_thumbnailer`, aborted before its handler begin:
+
+```text
+/usr/local/bin/node[1]: ../src/env.cc:1272:v8::Local<v8::Value>
+node::Environment::GetNow(): Assertion `(now) >= (timer_base())' failed.
+```
+
+The outer workload timeout then expired because the expected lifecycle output
+never appeared. This is a pre-window runtime failure, not an EPT measurement
+or benchmark failure. Do not treat the timeout as a 1,200-second handler, and
+do not discard or duplicate windows 1 through 6.
+
+The likely defect is the split-container libc clock implementation. Its
+`sc_sys_clock_gettime()` derives time from raw `RDTSC` and a process-global
+base without enforcing monotonicity across split-container vCPUs. A backward
+value is therefore consistent with Node's assertion. This remains a
+hypothesis until a bounded reproduction; do not patch or clamp the clock in
+the measurement build yet.
+
+The next boundary is exactly one true on-demand Thumbnailer VM:
+
+```bash
+sudo -v && \
+/home/booklyn/cofunc-tdx/scripts/run_cofunc_on_demand_thumbnail_probe.sh
+```
+
+The probe uses the same patches 0017/0018, count-only BPF program, 16-vCPU
+configuration, HugeTLB capacity gate, and no-retry policy as the matrix. It
+has a 180-second workload bound, recognizes only a pre-window Node clock
+assertion or a complete workload pass, verifies source/CMake/ISO restoration,
+and always runs the postflight safety gate. It never launches another
+workload. Only after this result should the collector gain a validated
+samples-7-through-12 resume and trace merger.
