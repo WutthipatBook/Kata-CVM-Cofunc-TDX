@@ -9413,3 +9413,19 @@ EPT lifecycle count, failed workload, unsafe host gate, kernel warning,
 private level-2 mapping, private 2 MiB promotion, or restoration mismatch.
 The maximum boundary is 24 CVMs. No VM was launched during implementation or
 offline testing.
+
+The first approved invocation stopped before any CVM at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_031030`.
+`fn_py_sentiment_base` attempted to download `textblob` through its artifact
+proxy `202.120.40.82`, and all requests timed out. Bpftrace was ready but saw
+zero signals/events. Runtime and source/boot hashes restored exactly, the
+postflight gate was ready, and prohibited kernel evidence was empty.
+
+The harness has since been changed to derive diagnostic images from the
+already complete local final images, copying only the instrumented runtime and
+Python/JavaScript handler template. This opt-in path contains no dependency
+installation or pull. A new preparation-only preflight builds and verifies all
+12 images, restores tags and source, and only then resets the kernel baseline
+and permits the paired CVMs. Shell syntax and 11 offline tests pass. The next
+boundary remains the same command above; do not bypass the new image preflight
+or retry an individual failed workload.

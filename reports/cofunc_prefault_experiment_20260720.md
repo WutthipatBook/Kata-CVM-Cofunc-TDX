@@ -797,3 +797,24 @@ sudo -v && /home/booklyn/cofunc-tdx/scripts/run_cofunc_prefault_fault_savings.sh
 
 The harness performs a privileged bpftrace dry-run before launching the first
 VM. No VM was launched while preparing or offline-testing this experiment.
+
+## First paired-run preparation failure and remediation
+
+The first approved attempt stopped before any CVM at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_031030`.
+The on-demand image-preparation phase rebuilt `fn_py_sentiment_base` and its
+hard-coded proxy at `202.120.40.82` timed out while downloading `textblob`.
+The tracer had attached successfully but observed zero signals and zero EPT
+events because workload execution never began. The postflight host gate was
+ready, prohibited kernel evidence was empty, and both runtime-source and
+top-level source/boot hashes matched after restoration.
+
+The paired harness now opts into a network-free image path. It derives each
+diagnostic image from the complete local final workload image and replaces
+only `/bin/sc-runtime` plus `/func/main.py` or `/func/main.js`. Normal artifact
+image rebuilding remains unchanged. Before capturing the experiment baseline,
+the harness prepares and verifies all 12 derived images in preparation-only
+mode, restores every image tag and source file, and hard-stops without a CVM
+if that preflight fails. The remediation passes shell syntax checks and all 11
+offline tests; it has not yet been exercised against the privileged Docker
+daemon or launched a VM.

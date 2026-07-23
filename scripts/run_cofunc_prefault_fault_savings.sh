@@ -161,6 +161,7 @@ run_mode() {
 				COFUNC_OLDABI_CVM_INSTRUMENTATION_PATCH="$6" \
 				COFUNC_OLDABI_RUNTIME_TRACE_PATCH="$7" \
 				COFUNC_OLDABI_RUNTIME_TRACE_MATRIX=1 \
+				COFUNC_OLDABI_REUSE_LOCAL_FINAL_IMAGE=1 \
 				COFUNC_EPT_TRACE_URL="${EPT_TRACE_BASE_URL}" \
 				STOP_AFTER_SMOKE=0 \
 				COFUNC_OLDABI_SKIP_FACE_SMOKE=1 \
@@ -185,6 +186,37 @@ run_mode() {
 	completed_modes+=("$mode")
 	rg -q '^CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=ON$' "$CONFIG" \
 		|| fail "$mode did not restore the pre-fault config"
+}
+
+prepare_images() {
+	local prep_root=$RUN_ROOT/image-preflight
+	local prep_rc
+	mkdir -p "$prep_root"
+	active_phase=image-preflight
+	set +e
+	sudo -n env \
+		ROOT="$ROOT" BUNDLE="$BUNDLE" \
+		OUT="$ROOT/results/cofunc_fault_savings_image_preflight_$STAMP" \
+		COFUNC_OLDABI_RUNTIME_BACKUP_DIR="$prep_root/runtime-backup" \
+		COFUNC_OLDABI_RUNTIME_TRACE_PATCH="$TRACE_PATCH" \
+		COFUNC_OLDABI_RUNTIME_TRACE_MATRIX=1 \
+		COFUNC_OLDABI_REUSE_LOCAL_FINAL_IMAGE=1 \
+		COFUNC_OLDABI_PREPARE_IMAGES_ONLY=1 \
+		STOP_AFTER_SMOKE=0 \
+		COFUNC_OLDABI_SKIP_FACE_SMOKE=1 \
+		COFUNC_OLDABI_RUNTIME_WORKLOADS="${WORKLOADS[*]}" \
+		COFUNC_OLDABI_RUNTIME_REPETITIONS=1 \
+		"$RUNNER" 2>&1 | tee "$prep_root/prepare.log"
+	prep_rc=${PIPESTATUS[0]}
+	set -e
+	(( prep_rc == 0 )) || fail "network-free image preflight failed: $prep_rc"
+	cmp -s "$prep_root/runtime-backup/sha256.before" \
+		"$prep_root/runtime-backup/sha256.restored" \
+		|| fail "image preflight did not restore runtime source"
+	hash_source_state >"$prep_root/source-state-after.sha256"
+	cmp -s "$RUN_ROOT/source-state-before.sha256" \
+		"$prep_root/source-state-after.sha256" \
+		|| fail "image preflight changed the source or boot baseline"
 }
 
 finish() {
@@ -282,6 +314,8 @@ sudo -n "$BPFTRACE" --dry-run "$TRACE_PROGRAM" 1 \
 	>"$RUN_ROOT/bpftrace-dry-run.log" 2>&1 \
 	|| fail "count-only EPT bpftrace program failed its dry-run"
 hash_source_state >"$RUN_ROOT/source-state-before.sha256"
+capture_dmesg before
+prepare_images
 capture_dmesg before
 
 run_mode on-demand "$ON_DEMAND_CVM_PATCH"

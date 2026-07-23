@@ -38,6 +38,8 @@ backup_done=0
 SELECTED_WORKLOADS=()
 DOCKER_BUILD_CACHE_ARGS=()
 REBUILD_WORKLOAD_BASE_FOR_TEMPLATES=0
+REUSE_LOCAL_FINAL_IMAGE="${COFUNC_OLDABI_REUSE_LOCAL_FINAL_IMAGE:-0}"
+PREPARE_IMAGES_ONLY="${COFUNC_OLDABI_PREPARE_IMAGES_ONLY:-0}"
 
 die() {
 	echo "error: $*" >&2
@@ -147,6 +149,48 @@ rebuild_workload_image() {
 			"$TOOLS/lean_container/rootfs.sh" clean
 		)
 	fi
+}
+
+rebuild_workload_image_from_local_final() {
+	local workload=$1
+	local dir=$2
+	local image=$3
+	local source_image="$image:$IMAGE_TAG_BACKUP"
+	local template target
+
+	case "$workload" in
+	chain_js_*)
+		template=template.js
+		target=index.js
+		;;
+	fn_js_*)
+		template=template.js
+		target=main.js
+		;;
+	*)
+		template=template.py
+		target=main.py
+		;;
+	esac
+
+	docker image inspect "$source_image" >/dev/null 2>&1 \
+		|| die "missing local recovery image for network-free rebuild: $source_image"
+	docker image inspect split_container_builder:latest >/dev/null 2>&1 \
+		|| die "missing local runtime builder for network-free rebuild"
+
+	remove_copied_tools "$dir"
+	log "deriving $image:latest from $source_image without dependency downloads"
+	(
+		cd "$dir"
+		cp -r "$TOOLS" tools
+		docker build --pull=false -t "$image" -f - . <<EOF
+FROM split_container_builder:latest AS builder
+FROM $source_image
+COPY tools/$template /func/$target
+COPY --from=builder /runtime/runtime /bin/sc-runtime
+EOF
+		rm -rf tools
+	)
 }
 
 verify_workload_image() {
@@ -271,8 +315,15 @@ main() {
 		|| die "COFUNC_OLDABI_SKIP_FACE_SMOKE must be 0 or 1, got $SKIP_FACE_SMOKE_VALUE"
 	[[ $RUNTIME_TRACE_MATRIX == 0 || $RUNTIME_TRACE_MATRIX == 1 ]] \
 		|| die "COFUNC_OLDABI_RUNTIME_TRACE_MATRIX must be 0 or 1, got $RUNTIME_TRACE_MATRIX"
+	[[ $REUSE_LOCAL_FINAL_IMAGE == 0 || $REUSE_LOCAL_FINAL_IMAGE == 1 ]] \
+		|| die "COFUNC_OLDABI_REUSE_LOCAL_FINAL_IMAGE must be 0 or 1, got $REUSE_LOCAL_FINAL_IMAGE"
+	[[ $PREPARE_IMAGES_ONLY == 0 || $PREPARE_IMAGES_ONLY == 1 ]] \
+		|| die "COFUNC_OLDABI_PREPARE_IMAGES_ONLY must be 0 or 1, got $PREPARE_IMAGES_ONLY"
 	if [[ $RUNTIME_TRACE_MATRIX == 1 && -z $RUNTIME_TRACE_PATCH ]]; then
 		die "runtime trace matrix mode requires a trace patch"
+	fi
+	if [[ $REUSE_LOCAL_FINAL_IMAGE == 1 && -z $RUNTIME_EXTRA_PATCH ]]; then
+		die "local final-image reuse requires runtime instrumentation"
 	fi
 
 	if [[ $STOP_AFTER_SMOKE_VALUE == 1 ]]; then
@@ -346,6 +397,8 @@ main() {
 		printf 'cofunc_oldabi_regular_memfile=%s\n' "${COFUNC_OLDABI_REGULAR_MEMFILE:-0}"
 		printf 'docker_build_cache_args=%s\n' "${DOCKER_BUILD_CACHE_ARGS[*]}"
 		printf 'rebuild_workload_base_for_templates=%s\n' "$REBUILD_WORKLOAD_BASE_FOR_TEMPLATES"
+		printf 'reuse_local_final_image=%s\n' "$REUSE_LOCAL_FINAL_IMAGE"
+		printf 'prepare_images_only=%s\n' "$PREPARE_IMAGES_ONLY"
 	} >"$BACKUP_DIR/options"
 
 	if rg -q 'CONFIG_PLAT_INTEL_TDX' "$CONFIG_H"; then
@@ -437,7 +490,13 @@ main() {
 			log "removing leftover copied tools directory for $image"
 			remove_copied_tools "$dir"
 			fi
-			rebuild_workload_image "$dir" "$image" 2>&1 | tee "$BACKUP_DIR/$image.build.log"
+		if [[ $REUSE_LOCAL_FINAL_IMAGE == 1 ]]; then
+			rebuild_workload_image_from_local_final "$workload" "$dir" "$image" \
+				2>&1 | tee "$BACKUP_DIR/$image.build.log"
+		else
+			rebuild_workload_image "$dir" "$image" \
+				2>&1 | tee "$BACKUP_DIR/$image.build.log"
+		fi
 		if [[ -n $RUNTIME_EXTRA_PATCH ]]; then
 			docker run --rm "$image:latest" grep -aFq "sc_host_grant_total_ns" /bin/sc-runtime \
 				|| die "rebuilt $image image does not contain runtime instrumentation"
@@ -446,7 +505,12 @@ main() {
 		fi
 		if [[ -n $RUNTIME_TRACE_PATCH ]]; then
 			case "$workload" in
-			fn_js_*|chain_js_*)
+			chain_js_*)
+				docker run --rm "$image:latest" sh -c \
+					'grep -Fq "FaultTraceSignal" /func/index.js && grep -Fq ".cofunc-ept-trace-url" /func/index.js' \
+					|| die "rebuilt $image image does not contain Alexa handler trace signaling"
+				;;
+			fn_js_*)
 				docker run --rm "$image:latest" sh -c \
 					'grep -Fq "FaultTraceSignal" /func/main.js && grep -Fq ".cofunc-ept-trace-url" /func/main.js' \
 					|| die "rebuilt $image image does not contain JS handler trace signaling"
@@ -459,9 +523,13 @@ main() {
 			esac
 		fi
 		verify_workload_image "$workload" "$image"
-			docker image inspect "$image:latest" --format '{{.Id}} {{.Created}}' \
-				>"$BACKUP_DIR/$image.diagnostic"
-		done
+		docker image inspect "$image:latest" --format '{{.Id}} {{.Created}}' \
+			>"$BACKUP_DIR/$image.diagnostic"
+	done
+	if [[ $PREPARE_IMAGES_ONLY == 1 ]]; then
+		log "all selected runtime images passed preparation-only validation; skipping CVM launch"
+		return 0
+	fi
 
 	log "running Turbo-WRMSR-skip + SMP-bound workload set with old-ABI TDX shadow runtime: $OUT stop_after_smoke=$STOP_AFTER_SMOKE_VALUE"
 	STOP_AFTER_SMOKE="$STOP_AFTER_SMOKE_VALUE" OUT="$OUT" "$CPU_SMOKE"
