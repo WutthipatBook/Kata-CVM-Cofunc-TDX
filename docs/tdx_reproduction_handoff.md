@@ -9641,3 +9641,20 @@ The fault-savings matrix is a separate diagnostic requested later to compare
 handler-window EPT faults with and without CoFunc private pre-fault. It is
 useful for that causal question but is not required for the original Vanilla
 Kata-TDX goal.
+
+The next invocation stopped before any VM at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_073140`.
+The strict reuse guard rejected the expected trace-wrapper SHA-256 change
+from the launcher fix. Its postflight gate was ready, source/boot hashes
+matched, and prohibited evidence was empty.
+
+Reuse now accepts exactly one pinned compatibility transition for
+`run_ept_trace_around.sh`: pre-fix SHA-256
+`7949bd4d8ebceccfc233b91dfa3662995127e7632cafb44c6016268a09bcda69`
+to fixed SHA-256
+`302a48f64ec22540079a0645c488ab542d91b9f738e145ee7bb905bf7df7af1a`.
+The accepted diff changes only launcher liveness checks and bounded process
+cleanup. Trace signaling, BPF program selection, command execution, result
+counting, and trace file formats are unchanged. Any other prior or current
+hash still hard-fails, and every accepted transition is recorded in
+`trace-wrapper-compatibility.txt`.

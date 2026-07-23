@@ -233,6 +233,42 @@ class FaultSavingsHarnessTest(unittest.TestCase):
         self.assertIn("reused-on-demand-partial-mode.verify", harness)
         self.assertIn("reused-on-demand-thumbnail-mode.verify", harness)
 
+    def test_reuse_allows_only_the_pinned_trace_launcher_fix(self):
+        harness = (
+            ROOT / "scripts/run_cofunc_prefault_fault_savings.sh"
+        ).read_text()
+        self.assertIn(
+            "TRACE_WRAPPER_PRE_LAUNCHER_FIX_SHA256="
+            "7949bd4d8ebceccfc233b91dfa3662995127e7632cafb44c6016268a09bcda69",
+            harness,
+        )
+        self.assertIn(
+            "TRACE_WRAPPER_LAUNCHER_FIX_SHA256="
+            "302a48f64ec22540079a0645c488ab542d91b9f738e145ee7bb905bf7df7af1a",
+            harness,
+        )
+        compatibility = harness[
+            harness.index("verify_prior_input_hash()") :
+            harness.index(
+                "\nverify_external_on_demand_mode()",
+                harness.index("verify_prior_input_hash()"),
+            )
+        ]
+        self.assertIn('$input == "$TRACE_WRAPPER"', compatibility)
+        self.assertIn(
+            '$prior_hash == "$TRACE_WRAPPER_PRE_LAUNCHER_FIX_SHA256"',
+            compatibility,
+        )
+        self.assertIn(
+            '$current_hash == "$TRACE_WRAPPER_LAUNCHER_FIX_SHA256"',
+            compatibility,
+        )
+        self.assertIn("trace-wrapper-compatibility.txt", compatibility)
+        self.assertIn(
+            'fail "reused mode input differs from current audited input: $input"',
+            compatibility,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

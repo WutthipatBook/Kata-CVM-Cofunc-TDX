@@ -6,6 +6,8 @@ BUNDLE=${BUNDLE:-/home/booklyn/cofunc-tdx}
 ROOT=${ROOT:-/mnt/new_disk/cofunc_tdx_artifact}
 ARTIFACT=$ROOT/cofunc-artifact-oldabi
 TRACE_WRAPPER=$BUNDLE/scripts/run_ept_trace_around.sh
+TRACE_WRAPPER_PRE_LAUNCHER_FIX_SHA256=7949bd4d8ebceccfc233b91dfa3662995127e7632cafb44c6016268a09bcda69
+TRACE_WRAPPER_LAUNCHER_FIX_SHA256=302a48f64ec22540079a0645c488ab542d91b9f738e145ee7bb905bf7df7af1a
 TRACE_PROGRAM=$BUNDLE/scripts/cofunc_ept_fault_count.bt
 BPFTRACE=${BPFTRACE:-/usr/local/bin/bpftrace}
 ANALYZER=$BUNDLE/scripts/analyze_cofunc_prefault_fault_savings.py
@@ -352,7 +354,7 @@ run_mode() {
 }
 
 reuse_prefault_mode() {
-	local reuse_root prior_root prior_result out prior_input_hash current_input_hash
+	local reuse_root prior_root prior_result out
 	local compiled_image audited_input
 	[[ $REUSE_PREFAULT_MODE_ROOT == /* ]] \
 		|| fail "COFUNC_REUSE_PREFAULT_MODE_ROOT must be an absolute path"
@@ -393,11 +395,7 @@ reuse_prefault_mode() {
 	done
 	for audited_input in "$TRACE_WRAPPER" "$TRACE_PROGRAM" "$ANALYZER" "$RUNNER" \
 		"$TRACE_PATCH" "$ON_DEMAND_CVM_PATCH"; do
-		prior_input_hash="$(awk -v path="$audited_input" \
-			'$2 == path { print $1 }' "$prior_root/experiment-inputs.sha256")"
-		current_input_hash="$(sha256sum "$audited_input" | awk '{ print $1 }')"
-		[[ -n $prior_input_hash && $prior_input_hash == "$current_input_hash" ]] \
-			|| fail "reused mode input differs from current audited input: $audited_input"
+		verify_prior_input_hash "$prior_root/experiment-inputs.sha256" "$audited_input"
 	done
 
 	ln -s "$reuse_root" "$RUN_ROOT/prefault"
@@ -433,8 +431,24 @@ verify_prior_input_hash() {
 	local prior_hash current_hash
 	prior_hash="$(awk -v path="$input" '$2 == path { print $1 }' "$manifest")"
 	current_hash="$(sha256sum "$input" | awk '{ print $1 }')"
-	[[ -n $prior_hash && $prior_hash == "$current_hash" ]] \
-		|| fail "reused mode input differs from current audited input: $input"
+	[[ -n $prior_hash ]] \
+		|| fail "reused mode lacks audited input hash: $input"
+	if [[ $prior_hash == "$current_hash" ]]; then
+		return
+	fi
+	if [[ $input == "$TRACE_WRAPPER" &&
+		$prior_hash == "$TRACE_WRAPPER_PRE_LAUNCHER_FIX_SHA256" &&
+		$current_hash == "$TRACE_WRAPPER_LAUNCHER_FIX_SHA256" ]]; then
+		{
+			printf 'manifest=%s\n' "$manifest"
+			printf 'input=%s\n' "$input"
+			printf 'prior_sha256=%s\n' "$prior_hash"
+			printf 'current_sha256=%s\n' "$current_hash"
+			printf 'compatibility=launcher-liveness-and-cleanup-only\n\n'
+		} >>"$RUN_ROOT/trace-wrapper-compatibility.txt"
+		return
+	fi
+	fail "reused mode input differs from current audited input: $input"
 }
 
 verify_external_on_demand_mode() {
