@@ -9502,3 +9502,10 @@ COFUNC_REUSE_PREFAULT_MODE_ROOT=/home/booklyn/BookArchive/StageBreakdownRuns/cof
 
 This boundary launches at most 12 CVMs, all true on-demand. No VM was launched
 during the correction.
+
+The first reuse-enabled attempt at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_044140`
+stopped before any VM because `verify_mode()` used a dependent variable in a
+single `local` declaration under `set -u`. The postflight gate was ready and
+evidence checks passed. Both affected declarations are split and covered by a
+regression test; use the same command above.

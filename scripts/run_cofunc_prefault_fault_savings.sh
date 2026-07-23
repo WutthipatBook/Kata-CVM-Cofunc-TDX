@@ -75,7 +75,9 @@ hash_source_state() {
 }
 
 check_mode_restoration() {
-	local mode=$1 mode_root=$RUN_ROOT/$mode
+	local mode mode_root
+	mode=$1
+	mode_root=$RUN_ROOT/$mode
 	cmp -s "$mode_root/runtime-backup/sha256.before" \
 		"$mode_root/runtime-backup/sha256.restored" \
 		|| fail "$mode runtime source restoration mismatch"
@@ -91,8 +93,11 @@ check_mode_restoration() {
 }
 
 verify_mode() {
-	local mode=$1 mode_root=$RUN_ROOT/$mode out=$mode_root/cofunc-out
+	local mode mode_root out
 	local workload safe gate_count delta_count expected_prefault actual_prefault compiled_mode
+	mode=$1
+	mode_root=$RUN_ROOT/$mode
+	out=$mode_root/cofunc-out
 	[[ -L $out ]] || fail "missing $mode CoFunc output link"
 	[[ $(awk -F= '$1 == "command_rc" { print $2 }' "$mode_root/ept-trace/trace-result.txt") == 0 ]] \
 		|| fail "$mode traced command failed"

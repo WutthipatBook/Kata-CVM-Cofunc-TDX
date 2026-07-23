@@ -868,3 +868,11 @@ COFUNC_REUSE_PREFAULT_MODE_ROOT=/home/booklyn/BookArchive/StageBreakdownRuns/cof
 ```
 
 No VM was launched while diagnosing or implementing this correction.
+
+The first reuse-enabled invocation stopped before any VM at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_044140`.
+Under `set -u`, `verify_mode()` expanded `$mode` inside the same `local`
+statement that declared it, producing `mode: unbound variable`. Postflight
+was ready and evidence checks passed. Dependent local assignments are now
+split into separate statements in both mode validators, with a regression
+test covering the unsafe form.

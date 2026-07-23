@@ -159,6 +159,17 @@ class FaultSavingsHarnessTest(unittest.TestCase):
         )
         self.assertLess(reuse_call, on_demand_call)
 
+    def test_mode_paths_do_not_use_unbound_dependent_locals(self):
+        harness = (
+            ROOT / "scripts/run_cofunc_prefault_fault_savings.sh"
+        ).read_text()
+        self.assertNotIn("local mode=$1 mode_root=", harness)
+        self.assertIn("mode=$1\n\tmode_root=$RUN_ROOT/$mode", harness)
+        self.assertIn(
+            "mode_root=$RUN_ROOT/$mode\n\tout=$mode_root/cofunc-out",
+            harness,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
