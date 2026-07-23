@@ -76,6 +76,89 @@ class FaultSavingsHarnessTest(unittest.TestCase):
             wrapper.index('STOP_AFTER_SMOKE="$STOP_AFTER_SMOKE_VALUE"'),
         )
 
+    def test_cvm_wrapper_reconfigures_and_proves_compiled_prefault_mode(self):
+        wrapper = (
+            ROOT / "scripts/run_oldabi_turbo_msr_skip_cpu_bound_smoke.sh"
+        ).read_text()
+        configure = wrapper.index(
+            'configure_kernel_prefault "$desired_prefault"'
+        )
+        clean = wrapper.index(
+            'cmake --build "$KERNEL_BUILD" --target clean', configure
+        )
+        build = wrapper.index(
+            'cmake --build . --target chcore.iso', clean
+        )
+        proof = wrapper.index(
+            'verify_compiled_prefault "$desired_prefault"', build
+        )
+        launch = wrapper.index(
+            '"running old-ABI workload set with diagnostic ISO', proof
+        )
+        self.assertLess(configure, clean)
+        self.assertLess(clean, build)
+        self.assertLess(build, proof)
+        self.assertLess(proof, launch)
+        self.assertIn(
+            '-DCHCORE_SPLIT_CONTAINER_PREFAULT:BOOL="$value"', wrapper
+        )
+        self.assertIn(
+            'grep -aFq "CoFunc private pre-fault:" "$image"', wrapper
+        )
+
+    def test_cvm_wrapper_restores_generated_cmake_state(self):
+        wrapper = (
+            ROOT / "scripts/run_oldabi_turbo_msr_skip_cpu_bound_smoke.sh"
+        ).read_text()
+        self.assertIn('"$BACKUP_DIR/configure-restore.rc"', wrapper)
+        self.assertIn(
+            'cp -a "$BACKUP_DIR/CMakeCache.txt.before" "$CMAKE_CACHE"',
+            wrapper,
+        )
+        self.assertIn(
+            'cp -a "$BACKUP_DIR/kernel-flags.make.before" "$KERNEL_FLAGS"',
+            wrapper,
+        )
+        self.assertIn('"$CMAKE_CACHE" "$KERNEL_FLAGS"', wrapper)
+
+    def test_matrix_can_reuse_only_validated_prefault_evidence(self):
+        harness = (
+            ROOT / "scripts/run_cofunc_prefault_fault_savings.sh"
+        ).read_text()
+        self.assertIn("COFUNC_REUSE_PREFAULT_MODE_ROOT", harness)
+        reuse = harness[
+            harness.index("reuse_prefault_mode()") :
+            harness.index("\nprepare_images()", harness.index("reuse_prefault_mode()"))
+        ]
+        self.assertIn("source-state-before.sha256", reuse)
+        self.assertIn("source-state-after.sha256", reuse)
+        self.assertIn("prohibited-kernel-markers.txt", reuse)
+        self.assertIn("postflight_gate_rc", reuse)
+        self.assertIn("evidence_rc", reuse)
+        self.assertIn("ON_DEMAND_CVM_PATCH", reuse)
+        self.assertIn("CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=ON", reuse)
+        self.assertIn("kernel.img.diagnostic", reuse)
+        self.assertIn("chcore.iso.diagnostic", reuse)
+        self.assertIn("experiment-inputs.sha256", reuse)
+        self.assertIn("TRACE_WRAPPER", reuse)
+        self.assertIn("TRACE_PROGRAM", reuse)
+        self.assertIn("TRACE_PATCH", reuse)
+        self.assertIn("verify_mode prefault", reuse)
+        self.assertIn("reused-prefault-mode.sha256", reuse)
+        self.assertIn("reused-prefault-output.sha256", reuse)
+        self.assertIn("verify_reused_prefault_unchanged()", harness)
+        self.assertIn(
+            'sha256sum -c "$RUN_ROOT/reused-prefault-mode.sha256"', harness
+        )
+        self.assertIn(
+            'sha256sum -c "$RUN_ROOT/reused-prefault-output.sha256"', harness
+        )
+        reuse_call = harness.rindex("reuse_prefault_mode\n")
+        on_demand_call = harness.rindex(
+            'run_mode on-demand "$ON_DEMAND_CVM_PATCH"'
+        )
+        self.assertLess(reuse_call, on_demand_call)
+
 
 if __name__ == "__main__":
     unittest.main()

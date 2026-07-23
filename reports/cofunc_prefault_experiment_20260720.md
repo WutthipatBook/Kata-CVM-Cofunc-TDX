@@ -818,3 +818,53 @@ mode, restores every image tag and source file, and hard-stops without a CVM
 if that preflight fails. The remediation passes shell syntax checks and all 11
 offline tests; it has not yet been exercised against the privileged Docker
 daemon or launched a VM.
+
+## Stale CMake cache invalidated the first complete matrix
+
+After the network-free and HugeTLB preflights were corrected, the next
+approved run completed all 12 launches and its trace cleanly, but stopped
+during semantic validation:
+
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_034000`
+
+Although patch 0018 changed `cvm_os/.config` to
+`CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=OFF`, the existing kernel build cache
+still contained `CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=ON`, and
+`CMakeFiles/kernel.img.dir/flags.make` still supplied
+`-DCHCORE_SPLIT_CONTAINER_PREFAULT`. The CVM wrapper cleaned and rebuilt that
+tree without reconfiguring it. Every workload therefore emitted a genuine
+`CoFunc private pre-fault:` marker. This run is pre-fault data, not an
+on-demand result.
+
+The run is otherwise complete and clean: 12 begin/end windows, 144 aggregate
+trace records, no trace loss, 12 analyzer rows, 24 ready workload gates, 12
+clean kernel deltas, a ready postflight gate, empty prohibited-kernel
+evidence, and exact runtime/CVM/top-level restoration. Both diagnostic boot
+images contain the pre-fault marker. The analyzer also parsed all 12 windows
+successfully in an offline audit.
+
+The CVM wrapper now explicitly reconfigures the kernel sub-build with the
+requested ON/OFF value before cleaning and building. It checks both the CMake
+cache and generated compiler flags, then rejects the kernel and ISO before VM
+launch if their embedded pre-fault marker disagrees with the requested mode.
+Cleanup reconfigures the original value and restores the exact saved cache,
+flags, sources, kernel image, and ISO.
+
+The paired harness can reuse the completed `034000/on-demand` directory as
+the pre-fault half. Reuse is allowed only after validating the prior
+postflight/evidence result, source and runtime/CVM restoration hashes, the
+exact patch-0018 hash, compiled-image markers, all workload markers and rows,
+all gates and deltas, and trace framing. It fingerprints the reused mode and
+external CoFunc output and checks those manifests again after the new
+on-demand run. Reuse is validated before any new VM starts.
+
+The next invocation therefore launches at most 12 CVMs, all in a newly proven
+on-demand build:
+
+```bash
+sudo -v && \
+COFUNC_REUSE_PREFAULT_MODE_ROOT=/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_034000/on-demand \
+/home/booklyn/cofunc-tdx/scripts/run_cofunc_prefault_fault_savings.sh
+```
+
+No VM was launched while diagnosing or implementing this correction.

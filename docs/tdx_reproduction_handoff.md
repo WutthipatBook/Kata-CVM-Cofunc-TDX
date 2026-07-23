@@ -9460,3 +9460,45 @@ The paired harness now repeats this exact largest-workload no-VM gate after
 each mode's image preparation and immediately before allowing that mode's
 first CVM. It requires 512 pages, an empty pool after cleanup, and a ready host
 safety gate; otherwise it stops before QEMU.
+
+### Fault-savings matrix CMake-cache correction
+
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_034000`
+completed 12/12 workloads and tracing, but its nominal on-demand mode was
+actually pre-fault. Patch 0018 changed `.config` to OFF while the kernel
+sub-build's `CMakeCache.txt` remained ON and its generated flags retained
+`-DCHCORE_SPLIT_CONTAINER_PREFAULT`. Cleaning and rebuilding did not
+reconfigure that cache. All 12 workload logs and both diagnostic boot images
+contain the private pre-fault marker.
+
+Do not use `034000/on-demand` as on-demand data. It is a valid pre-fault
+candidate: the trace has 12 begin/end windows, 144 aggregate records, and no
+loss; all 12 analyzer rows exist; all 24 workload gates and the postflight
+gate were ready; all 12 deltas and top-level prohibited evidence were clean;
+and runtime, CVM, and top-level source/boot state restored exactly. An offline
+analyzer and artifact audit passed.
+
+`run_oldabi_turbo_msr_skip_cpu_bound_smoke.sh` now:
+
+- explicitly configures the kernel sub-build to the requested pre-fault mode;
+- verifies the CMake cache and generated compiler definition;
+- proves the built kernel and ISO mode from the embedded pre-fault marker
+  before any VM;
+- restores and hashes the original generated CMake state during cleanup.
+
+`run_cofunc_prefault_fault_savings.sh` can reuse the preserved complete run as
+the pre-fault half. Before launching the new on-demand half, it validates the
+prior patch hash, compiled images, trace, workload rows/markers, safety
+evidence, and all restoration hashes. It records SHA-256 manifests for the
+mode and external output, then verifies them again before analysis.
+
+Run exactly:
+
+```bash
+sudo -v && \
+COFUNC_REUSE_PREFAULT_MODE_ROOT=/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_034000/on-demand \
+/home/booklyn/cofunc-tdx/scripts/run_cofunc_prefault_fault_savings.sh
+```
+
+This boundary launches at most 12 CVMs, all true on-demand. No VM was launched
+during the correction.

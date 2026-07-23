@@ -22,6 +22,8 @@ ISO="$ARTIFACT/cvm_os/build/chcore.iso"
 KERNEL_BUILD="$ARTIFACT/cvm_os/build/kernel"
 KERNEL_IMG="$KERNEL_BUILD/kernel.img"
 KERNEL_ISO="$KERNEL_BUILD/arch/x86_64/boot/intel_tdx/chcore.iso"
+CMAKE_CACHE="$KERNEL_BUILD/CMakeCache.txt"
+KERNEL_FLAGS="$KERNEL_BUILD/CMakeFiles/kernel.img.dir/flags.make"
 STAMP="$(date -u +%Y%m%d_%H%M%S)"
 BACKUP_DIR="${COFUNC_OLDABI_CVM_BACKUP_DIR:-$BUNDLE/backups/oldabi-turbo-smp-bound-$STAMP}"
 OUT="${OUT:-$ROOT/results/oldabi_5_19_turbo_smp_bound_smoke_$STAMP}"
@@ -42,8 +44,59 @@ log() {
 hash_state() {
 	local path
 	for path in "$CONFIG" "$TDX_C" "$SMP_C" "$MADT_C" "$ACPI_H" "$SPLIT_C" \
-		"$SNAPSHOT_C" "$IRQ_C" "$CAP_GROUP_H" "$KERNEL_IMG" "$KERNEL_ISO" "$ISO"; do
+		"$SNAPSHOT_C" "$IRQ_C" "$CAP_GROUP_H" "$CMAKE_CACHE" "$KERNEL_FLAGS" \
+		"$KERNEL_IMG" "$KERNEL_ISO" "$ISO"; do
 		[[ -e "$path" ]] && sha256sum "$path"
+	done
+}
+
+prefault_config_value() {
+	awk -F= '$1 == "CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL" { print $2 }' "$1"
+}
+
+configure_kernel_prefault() {
+	local value=$1 log_path=$2 actual
+	[[ $value == ON || $value == OFF ]] || {
+		printf 'invalid private pre-fault value: %s\n' "$value" >&2
+		return 1
+	}
+	cmake -S "$ARTIFACT/cvm_os/kernel" -B "$KERNEL_BUILD" \
+		-DCHCORE_SPLIT_CONTAINER_PREFAULT:BOOL="$value" \
+		>"$log_path" 2>&1 || return 1
+	actual="$(prefault_config_value "$CMAKE_CACHE")"
+	[[ $actual == "$value" ]] || {
+		printf 'kernel CMake cache has private pre-fault=%s, expected %s\n' \
+			"$actual" "$value" >&2
+		return 1
+	}
+	[[ -f "$KERNEL_FLAGS" ]] || {
+		printf 'kernel flags file was not generated: %s\n' "$KERNEL_FLAGS" >&2
+		return 1
+	}
+	if [[ $value == ON ]]; then
+		rg -q -- '-DCHCORE_SPLIT_CONTAINER_PREFAULT([[:space:]]|$)' "$KERNEL_FLAGS" || {
+			printf 'kernel flags do not enable private pre-fault\n' >&2
+			return 1
+		}
+	elif rg -q -- '-DCHCORE_SPLIT_CONTAINER_PREFAULT([[:space:]]|$)' "$KERNEL_FLAGS"; then
+		printf 'kernel flags still enable private pre-fault\n' >&2
+		return 1
+	fi
+}
+
+verify_compiled_prefault() {
+	local value=$1 image
+	for image in "$KERNEL_IMG" "$ISO"; do
+		if [[ $value == ON ]]; then
+			LC_ALL=C grep -aFq "CoFunc private pre-fault:" "$image" || {
+				printf 'compiled image lacks private pre-fault marker: %s\n' "$image" >&2
+				return 1
+			}
+		elif LC_ALL=C grep -aFq "CoFunc private pre-fault:" "$image"; then
+			printf 'compiled image unexpectedly contains private pre-fault marker: %s\n' \
+				"$image" >&2
+			return 1
+		fi
 	done
 }
 
@@ -60,7 +113,7 @@ ensure_rw() {
 }
 
 cleanup() {
-	local rc=$?
+	local rc=$? restore_value configure_rc=0 clean_rc=0
 	set +e
 	if ((backup_done)); then
 		log "restoring old-ABI source and boot images"
@@ -73,12 +126,23 @@ cleanup() {
 		cp -a "$BACKUP_DIR/snapshot.c.before" "$SNAPSHOT_C"
 		cp -a "$BACKUP_DIR/irq_entry.c.before" "$IRQ_C"
 		cp -a "$BACKUP_DIR/cap_group.h.before" "$CAP_GROUP_H"
+		restore_value="$(prefault_config_value "$BACKUP_DIR/config.before")"
+		if configure_kernel_prefault "$restore_value" \
+			"$BACKUP_DIR/configure-restore.log"; then
+			configure_rc=0
+		else
+			configure_rc=1
+		fi
+		printf '%d\n' "$configure_rc" >"$BACKUP_DIR/configure-restore.rc"
 		# An optional CVM patch may alter headers or sources outside the fixed
 		# diagnostic set. Drop all kernel objects so none can outlive restored
 		# source with a newer timestamp.
 		cmake --build "$KERNEL_BUILD" --target clean \
 			>"$BACKUP_DIR/build-clean.log" 2>&1
-		printf '%d\n' "$?" >"$BACKUP_DIR/build-clean.rc"
+		clean_rc=$?
+		printf '%d\n' "$clean_rc" >"$BACKUP_DIR/build-clean.rc"
+		cp -a "$BACKUP_DIR/CMakeCache.txt.before" "$CMAKE_CACHE"
+		cp -a "$BACKUP_DIR/kernel-flags.make.before" "$KERNEL_FLAGS"
 		[[ -f "$BACKUP_DIR/kernel.img.before" ]] && cp -a "$BACKUP_DIR/kernel.img.before" "$KERNEL_IMG"
 		if [[ -f "$BACKUP_DIR/kernel-chcore.iso.before" ]]; then
 			cp -a "$BACKUP_DIR/kernel-chcore.iso.before" "$KERNEL_ISO"
@@ -90,6 +154,9 @@ cleanup() {
 		if rg -q "$DIAG_MARKERS" "$TDX_C" "$SMP_C" "$MADT_C" "$ACPI_H" \
 			"$SPLIT_C" "$SNAPSHOT_C" "$IRQ_C" "$CAP_GROUP_H"; then
 			log "warning: diagnostic marker still present after restore"
+		fi
+		if ((configure_rc != 0 || clean_rc != 0)) && ((rc == 0)); then
+			rc=1
 		fi
 		log "restore evidence: $BACKUP_DIR"
 	fi
@@ -116,6 +183,8 @@ main() {
 	[[ -f "$IRQ_C" ]] || die "missing IRQ source: $IRQ_C"
 	[[ -f "$CAP_GROUP_H" ]] || die "missing cap-group header: $CAP_GROUP_H"
 	[[ -d "$KERNEL_BUILD" ]] || die "missing kernel build dir: $KERNEL_BUILD"
+	[[ -f "$CMAKE_CACHE" ]] || die "missing kernel CMake cache: $CMAKE_CACHE"
+	[[ -f "$KERNEL_FLAGS" ]] || die "missing kernel flags: $KERNEL_FLAGS"
 	[[ -f "$KERNEL_IMG" ]] || die "missing kernel image: $KERNEL_IMG"
 	[[ -f "$ISO" ]] || die "missing runtime ISO: $ISO"
 	[[ $FORCE_4K_ACCEPT_VALUE == 0 || $FORCE_4K_ACCEPT_VALUE == 1 ]] \
@@ -132,6 +201,8 @@ main() {
 	cp -a "$SNAPSHOT_C" "$BACKUP_DIR/snapshot.c.before"
 	cp -a "$IRQ_C" "$BACKUP_DIR/irq_entry.c.before"
 	cp -a "$CAP_GROUP_H" "$BACKUP_DIR/cap_group.h.before"
+	cp -a "$CMAKE_CACHE" "$BACKUP_DIR/CMakeCache.txt.before"
+	cp -a "$KERNEL_FLAGS" "$BACKUP_DIR/kernel-flags.make.before"
 	cp -a "$KERNEL_IMG" "$BACKUP_DIR/kernel.img.before"
 	[[ -f "$KERNEL_ISO" ]] && cp -a "$KERNEL_ISO" "$BACKUP_DIR/kernel-chcore.iso.before"
 	cp -a "$ISO" "$BACKUP_DIR/chcore.iso.before"
@@ -161,6 +232,14 @@ main() {
 		patch -d "$ARTIFACT" -p1 -i "$EXTRA_CVM_PATCH"
 	fi
 
+	local desired_prefault
+	desired_prefault="$(prefault_config_value "$CONFIG")"
+	[[ $desired_prefault == ON || $desired_prefault == OFF ]] \
+		|| die "invalid private pre-fault value in $CONFIG: $desired_prefault"
+	log "configuring kernel build with private pre-fault=$desired_prefault"
+	configure_kernel_prefault "$desired_prefault" "$BACKUP_DIR/configure-diagnostic.log" \
+		|| die "kernel CMake pre-fault configuration failed"
+
 	log "removing stale old-ABI build outputs"
 	cmake --build "$KERNEL_BUILD" --target clean
 	rm -f "$KERNEL_IMG" "$KERNEL_ISO" "$ISO"
@@ -175,6 +254,11 @@ main() {
 	[[ -f "$KERNEL_ISO" || -f "$ISO" ]] || die "build produced neither $KERNEL_ISO nor $ISO"
 	[[ -f "$KERNEL_ISO" ]] && cp -a "$KERNEL_ISO" "$ISO"
 	[[ -f "$ISO" ]] || die "build did not produce $ISO"
+	verify_compiled_prefault "$desired_prefault" \
+		|| die "compiled private pre-fault mode does not match requested $desired_prefault"
+	printf '%s\n' "$desired_prefault" >"$BACKUP_DIR/compiled-prefault-mode"
+	cp -a "$CMAKE_CACHE" "$BACKUP_DIR/CMakeCache.txt.diagnostic"
+	cp -a "$KERNEL_FLAGS" "$BACKUP_DIR/kernel-flags.make.diagnostic"
 
 	LC_ALL=C grep -aFq "[CoFunc diag] skip TDX WRMSR 0x1a0" "$KERNEL_IMG" \
 		|| die "rebuilt kernel.img does not contain diagnostic WRMSR skip marker"

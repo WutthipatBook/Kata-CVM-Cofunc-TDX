@@ -17,6 +17,7 @@ PREFAULT_CVM_PATCH=$BUNDLE/patches/cofunc-artifact-oldabi/0006-Diagnostic-expose
 ON_DEMAND_CVM_PATCH=$BUNDLE/patches/cofunc-artifact-oldabi/0018-Diagnostic-disable-prefault-and-expose-stats.patch
 STAMP=$(date -u +%Y%m%d_%H%M%S)
 RUN_ROOT=${RUN_ROOT:-/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_$STAMP}
+REUSE_PREFAULT_MODE_ROOT=${COFUNC_REUSE_PREFAULT_MODE_ROOT:-}
 
 CONFIG=$ARTIFACT/cvm_os/.config
 SPLIT_C=$ARTIFACT/cvm_os/kernel/split-container/split_container.c
@@ -83,11 +84,15 @@ check_mode_restoration() {
 		|| fail "$mode CVM source or boot restoration mismatch"
 	[[ $(< "$mode_root/cvm-backup/build-clean.rc") == 0 ]] \
 		|| fail "$mode CVM build cleanup failed"
+	if [[ -f $mode_root/cvm-backup/configure-restore.rc ]]; then
+		[[ $(< "$mode_root/cvm-backup/configure-restore.rc") == 0 ]] \
+			|| fail "$mode CVM CMake restoration failed"
+	fi
 }
 
 verify_mode() {
 	local mode=$1 mode_root=$RUN_ROOT/$mode out=$mode_root/cofunc-out
-	local workload safe gate_count delta_count expected_prefault actual_prefault
+	local workload safe gate_count delta_count expected_prefault actual_prefault compiled_mode
 	[[ -L $out ]] || fail "missing $mode CoFunc output link"
 	[[ $(awk -F= '$1 == "command_rc" { print $2 }' "$mode_root/ept-trace/trace-result.txt") == 0 ]] \
 		|| fail "$mode traced command failed"
@@ -143,6 +148,18 @@ verify_mode() {
 		|| fail "$mode HugeTLB preflight did not restore the empty pool"
 	rg -q '^host_safety=ready$' "$mode_root/hugepage-preflight/host-after.log" \
 		|| fail "$mode post-HugeTLB host gate did not report ready"
+	if [[ ! -L $mode_root ]]; then
+		[[ -f $mode_root/cvm-backup/compiled-prefault-mode ]] \
+			|| fail "$mode lacks compiled private pre-fault mode evidence"
+		compiled_mode="$(< "$mode_root/cvm-backup/compiled-prefault-mode")"
+		if [[ $mode == prefault ]]; then
+			[[ $compiled_mode == ON ]] \
+				|| fail "$mode compiled mode is $compiled_mode, expected ON"
+		else
+			[[ $compiled_mode == OFF ]] \
+				|| fail "$mode compiled mode is $compiled_mode, expected OFF"
+		fi
+	fi
 }
 
 run_mode() {
@@ -194,6 +211,82 @@ run_mode() {
 	completed_modes+=("$mode")
 	rg -q '^CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=ON$' "$CONFIG" \
 		|| fail "$mode did not restore the pre-fault config"
+}
+
+reuse_prefault_mode() {
+	local reuse_root prior_root prior_result out prior_input_hash current_input_hash
+	local compiled_image audited_input
+	[[ $REUSE_PREFAULT_MODE_ROOT == /* ]] \
+		|| fail "COFUNC_REUSE_PREFAULT_MODE_ROOT must be an absolute path"
+	reuse_root="$(readlink -f -- "$REUSE_PREFAULT_MODE_ROOT")"
+	[[ -d $reuse_root ]] || fail "missing reused pre-fault mode root: $reuse_root"
+	[[ -L $reuse_root/cofunc-out ]] \
+		|| fail "reused pre-fault mode lacks its CoFunc output link"
+	out="$(readlink -f -- "$reuse_root/cofunc-out")"
+	[[ -d $out ]] || fail "reused pre-fault CoFunc output is missing: $out"
+	prior_root="$(dirname "$reuse_root")"
+	[[ -f $prior_root/harness-result.txt ]] \
+		|| fail "reused pre-fault parent lacks harness result"
+	prior_result=$prior_root/harness-result.txt
+	[[ $(awk -F= '$1 == "postflight_gate_rc" { print $2 }' "$prior_result") == 0 ]] \
+		|| fail "reused pre-fault parent postflight failed"
+	[[ $(awk -F= '$1 == "evidence_rc" { print $2 }' "$prior_result") == 0 ]] \
+		|| fail "reused pre-fault parent evidence check failed"
+	cmp -s "$prior_root/source-state-before.sha256" \
+		"$prior_root/source-state-after.sha256" \
+		|| fail "reused pre-fault parent did not restore source and boot state"
+	[[ ! -s $prior_root/prohibited-kernel-markers.txt ]] \
+		|| fail "reused pre-fault parent has prohibited kernel evidence"
+	rg -q '^host_safety=ready$' "$prior_root/postflight.log" \
+		|| fail "reused pre-fault parent postflight was not ready"
+	rg -q "^cofunc_oldabi_cvm_extra_patch=.*/$(basename "$ON_DEMAND_CVM_PATCH")$" \
+		"$reuse_root/cvm-backup/options" \
+		|| fail "reused pre-fault mode does not use the audited instrumentation patch"
+	rg -q '^CHCORE_SPLIT_CONTAINER_PREFAULT:BOOL=ON$' \
+		"$reuse_root/cvm-backup/config.before" \
+		|| fail "reused pre-fault mode did not start from the enabled baseline"
+	for compiled_image in \
+		"$reuse_root/cvm-backup/kernel.img.diagnostic" \
+		"$reuse_root/cvm-backup/chcore.iso.diagnostic"; do
+		[[ -f $compiled_image ]] \
+			|| fail "reused pre-fault mode lacks compiled image: $compiled_image"
+		LC_ALL=C grep -aFq "CoFunc private pre-fault:" "$compiled_image" \
+			|| fail "reused compiled image lacks private pre-fault: $compiled_image"
+	done
+	for audited_input in "$TRACE_WRAPPER" "$TRACE_PROGRAM" "$ANALYZER" "$RUNNER" \
+		"$TRACE_PATCH" "$ON_DEMAND_CVM_PATCH"; do
+		prior_input_hash="$(awk -v path="$audited_input" \
+			'$2 == path { print $1 }' "$prior_root/experiment-inputs.sha256")"
+		current_input_hash="$(sha256sum "$audited_input" | awk '{ print $1 }')"
+		[[ -n $prior_input_hash && $prior_input_hash == "$current_input_hash" ]] \
+			|| fail "reused mode input differs from current audited input: $audited_input"
+	done
+
+	ln -s "$reuse_root" "$RUN_ROOT/prefault"
+	verify_mode prefault
+	{
+		printf 'reused_mode_root=%s\n' "$reuse_root"
+		printf 'reused_parent_root=%s\n' "$prior_root"
+		printf 'reused_cofunc_out=%s\n' "$out"
+		printf 'reused_parent_run_rc=%s\n' \
+			"$(awk -F= '$1 == "run_rc" { print $2 }' "$prior_result")"
+		printf 'validation=passed\n'
+	} >"$RUN_ROOT/reused-prefault-provenance.txt"
+	find "$reuse_root" -type f -print0 | sort -z | xargs -0 sha256sum \
+		>"$RUN_ROOT/reused-prefault-mode.sha256"
+	find "$out" -type f -print0 | sort -z | xargs -0 sha256sum \
+		>"$RUN_ROOT/reused-prefault-output.sha256"
+	completed_modes+=("prefault(reused)")
+}
+
+verify_reused_prefault_unchanged() {
+	[[ -n $REUSE_PREFAULT_MODE_ROOT ]] || return
+	sha256sum -c "$RUN_ROOT/reused-prefault-mode.sha256" \
+		>"$RUN_ROOT/reused-prefault-mode.verify" 2>&1 \
+		|| fail "reused pre-fault mode changed during on-demand collection"
+	sha256sum -c "$RUN_ROOT/reused-prefault-output.sha256" \
+		>"$RUN_ROOT/reused-prefault-output.verify" 2>&1 \
+		|| fail "reused pre-fault output changed during on-demand collection"
 }
 
 prepare_images() {
@@ -277,8 +370,8 @@ finish() {
 	exit "$final_rc"
 }
 
-for command in awk bash cmp diff dmesg docker find findmnt jq patch ps python3 rg \
-	sed sha256sum sort sudo tee xargs; do
+for command in awk bash cmp diff dirname dmesg docker find findmnt jq patch ps \
+	python3 readlink rg sed sha256sum sort sudo tee xargs; do
 	need "$command"
 done
 for executable in "$TRACE_WRAPPER" "$ANALYZER" "$RUNNER" "$GATE" "$OLD_PREFLIGHT" "$BPFTRACE"; do
@@ -298,6 +391,7 @@ trap finish EXIT
 	printf 'samples_per_function_per_mode=1\n'
 	printf 'automatic_retries=0\n'
 	printf 'workloads=%s\n' "${WORKLOADS[*]}"
+	printf 'reuse_prefault_mode_root=%s\n' "$REUSE_PREFAULT_MODE_ROOT"
 } >"$RUN_ROOT/experiment-env.txt"
 cp "$0" "$RUN_ROOT/harness.sh"
 sha256sum "$0" "$TRACE_WRAPPER" "$TRACE_PROGRAM" "$ANALYZER" "$RUNNER" \
@@ -326,8 +420,15 @@ capture_dmesg before
 prepare_images
 capture_dmesg before
 
+if [[ -n $REUSE_PREFAULT_MODE_ROOT ]]; then
+	active_phase=prefault-reuse-validation
+	reuse_prefault_mode
+fi
 run_mode on-demand "$ON_DEMAND_CVM_PATCH"
-run_mode prefault "$PREFAULT_CVM_PATCH"
+if [[ -z $REUSE_PREFAULT_MODE_ROOT ]]; then
+	run_mode prefault "$PREFAULT_CVM_PATCH"
+fi
+verify_reused_prefault_unchanged
 
 active_phase=analysis
 "$ANALYZER" \
