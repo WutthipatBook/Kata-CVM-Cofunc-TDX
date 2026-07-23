@@ -29,6 +29,10 @@ cleanup() {
 	local rc=$?
 	set +e
 	if [[ -d ${OUT:-} ]]; then
+		cat /proc/sys/vm/nr_hugepages >"$OUT/nr_hugepages-before-clean" 2>/dev/null || true
+		grep -E 'HugePages|Hugepagesize|AnonHugePages|ShmemHugePages|FileHugePages' \
+			/proc/meminfo >"$OUT/meminfo-before-clean.txt" 2>/dev/null || true
+		cat /proc/buddyinfo >"$OUT/buddyinfo-before-clean.txt" 2>/dev/null || true
 		(
 			cd "$ARTIFACT/testcases/testcases/$WORKLOAD" || exit 0
 			"$HUGEPAGE_SH" clean >/dev/null 2>&1 || true
@@ -60,8 +64,11 @@ main() {
 	cat /proc/sys/vm/nr_hugepages >"$OUT/nr_hugepages-before" 2>/dev/null || true
 	grep -E 'HugePages|Hugepagesize|AnonHugePages|ShmemHugePages|FileHugePages' \
 		/proc/meminfo >"$OUT/meminfo-before.txt" 2>/dev/null || true
+	cat /proc/buddyinfo >"$OUT/buddyinfo-before.txt" 2>/dev/null || true
 
 	trap cleanup EXIT
+	echo 1 >/proc/sys/vm/compact_memory
+	cat /proc/buddyinfo >"$OUT/buddyinfo-after-compact.txt" 2>/dev/null || true
 	(
 		cd "$ARTIFACT/testcases/testcases/$WORKLOAD"
 		"$HUGEPAGE_SH"

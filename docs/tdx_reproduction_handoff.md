@@ -9437,3 +9437,16 @@ stopped before source/image mutation because the lower wrapper still required
 which preparation-only mode explicitly skips. The validation now requires the
 URL only when CVM launch is enabled. Postflight was ready, evidence checks
 passed, and no VM launched.
+
+The next invocation passed all 12 network-free image checks and reached the
+on-demand phase at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_032630`.
+Its first workload stopped before QEMU because hugetlbfs `fallocate` could not
+allocate the 128 MiB compression backing file. Runtime/CVM restoration and the
+postflight gate passed, with no trace signals, EPT events, or prohibited kernel
+evidence. A subsequent no-VM 1 GiB DNA capacity probe also failed while host
+safety remained ready. The old probe discarded the kernel's partial HugeTLB
+reservation during cleanup and did not compact memory like the workload path.
+It now compacts first and records HugeTLB/buddy state immediately before
+cleanup, including on failure. Do not retry the paired matrix until this
+bounded capacity probe succeeds for DNA.

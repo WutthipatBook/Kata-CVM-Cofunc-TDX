@@ -6,6 +6,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FaultSavingsHarnessTest(unittest.TestCase):
+    def test_hugepage_probe_matches_workload_compaction_and_keeps_failure_state(self):
+        probe = (ROOT / "scripts/run_oldabi_hugepage_only_probe.sh").read_text()
+        self.assertIn('echo 1 >/proc/sys/vm/compact_memory', probe)
+        self.assertIn('nr_hugepages-before-clean', probe)
+        self.assertIn('meminfo-before-clean.txt', probe)
+        self.assertIn('buddyinfo-before-clean.txt', probe)
+        self.assertLess(
+            probe.index('echo 1 >/proc/sys/vm/compact_memory'),
+            probe.rindex('"$HUGEPAGE_SH"'),
+        )
+
     def test_matrix_enables_network_free_image_derivation(self):
         harness = (ROOT / "scripts/run_cofunc_prefault_fault_savings.sh").read_text()
         self.assertIn("COFUNC_OLDABI_REUSE_LOCAL_FINAL_IMAGE=1", harness)
