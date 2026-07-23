@@ -13,6 +13,7 @@ RUNTIME_METRICS_PATCH="${COFUNC_OLDABI_RUNTIME_METRICS_PATCH:-}"
 RUNTIME_TRACE_PATCH="${COFUNC_OLDABI_RUNTIME_TRACE_PATCH:-}"
 RUNTIME_TRACE_MATRIX="${COFUNC_OLDABI_RUNTIME_TRACE_MATRIX:-0}"
 CPU_SMOKE="$BUNDLE/scripts/run_oldabi_turbo_msr_skip_cpu_bound_smoke.sh"
+HUGEPAGE_PROBE="$BUNDLE/scripts/run_oldabi_hugepage_only_probe.sh"
 DEFAULT_WORKLOAD="fn_py_face_detection"
 TOOLS="$ARTIFACT/testcases/tools"
 CONFIG_H="$SHADOW_DIR/config.h"
@@ -40,6 +41,9 @@ DOCKER_BUILD_CACHE_ARGS=()
 REBUILD_WORKLOAD_BASE_FOR_TEMPLATES=0
 REUSE_LOCAL_FINAL_IMAGE="${COFUNC_OLDABI_REUSE_LOCAL_FINAL_IMAGE:-0}"
 PREPARE_IMAGES_ONLY="${COFUNC_OLDABI_PREPARE_IMAGES_ONLY:-0}"
+HUGEPAGE_PREFLIGHT_WORKLOAD="${COFUNC_OLDABI_HUGEPAGE_PREFLIGHT_WORKLOAD:-}"
+HUGEPAGE_PREFLIGHT_OUT="${COFUNC_OLDABI_HUGEPAGE_PREFLIGHT_OUT:-$BACKUP_DIR/hugepage-preflight}"
+HOST_SAFETY_GATE="${COFUNC_HOST_SAFETY_GATE:-}"
 
 die() {
 	echo "error: $*" >&2
@@ -238,6 +242,31 @@ verify_workload_image() {
 		>"$BACKUP_DIR/$image.verified-images.json"
 }
 
+run_hugepage_preflight() {
+	local memory_mb expected_pages actual_pages before_pages after_pages
+	local safe_workload=${HUGEPAGE_PREFLIGHT_WORKLOAD//\//_}
+
+	memory_mb=$(< "$(workload_dir "$HUGEPAGE_PREFLIGHT_WORKLOAD")/memory")
+	expected_pages=$((memory_mb / 2))
+	log "running no-VM HugeTLB capacity preflight: workload=$HUGEPAGE_PREFLIGHT_WORKLOAD pages=$expected_pages"
+	OUT="$HUGEPAGE_PREFLIGHT_OUT" \
+		"$HUGEPAGE_PROBE" "$HUGEPAGE_PREFLIGHT_WORKLOAD" \
+		2>&1 | tee "$BACKUP_DIR/hugepage-preflight.log"
+
+	before_pages=$(< "$HUGEPAGE_PREFLIGHT_OUT/nr_hugepages-before")
+	actual_pages=$(< "$HUGEPAGE_PREFLIGHT_OUT/nr_hugepages-after-alloc")
+	after_pages=$(< "$HUGEPAGE_PREFLIGHT_OUT/nr_hugepages-after-clean")
+	[[ $before_pages == 0 ]] \
+		|| die "HugeTLB preflight began with an occupied pool: $before_pages pages"
+	[[ $actual_pages == "$expected_pages" ]] \
+		|| die "HugeTLB preflight reserved $actual_pages/$expected_pages pages"
+	[[ $after_pages == 0 ]] \
+		|| die "HugeTLB preflight cleanup left $after_pages pages"
+
+	"$HOST_SAFETY_GATE" "after-hugepage-preflight-$safe_workload" \
+		| tee "$HUGEPAGE_PREFLIGHT_OUT/host-after.log"
+}
+
 cleanup() {
 	local rc=$?
 	local workload dir image
@@ -312,6 +341,12 @@ main() {
 	[[ -f "$ANALYZE_PY" ]] || die "missing analyzer: $ANALYZE_PY"
 	[[ -x "$TOOLS/build.sh" ]] || die "missing testcase build helper: $TOOLS/build.sh"
 	[[ -x "$TOOLS/lean_container/rootfs.sh" ]] || die "missing rootfs helper: $TOOLS/lean_container/rootfs.sh"
+	if [[ -n $HUGEPAGE_PREFLIGHT_WORKLOAD ]]; then
+		[[ -x $HUGEPAGE_PROBE ]] || die "missing HugeTLB preflight helper: $HUGEPAGE_PROBE"
+		[[ -x $HOST_SAFETY_GATE ]] || die "HugeTLB preflight requires COFUNC_HOST_SAFETY_GATE"
+		[[ -d $(workload_dir "$HUGEPAGE_PREFLIGHT_WORKLOAD") ]] \
+			|| die "missing HugeTLB preflight workload: $HUGEPAGE_PREFLIGHT_WORKLOAD"
+	fi
 	[[ $STOP_AFTER_SMOKE_VALUE == 0 || $STOP_AFTER_SMOKE_VALUE == 1 ]] \
 		|| die "STOP_AFTER_SMOKE must be 0 or 1, got $STOP_AFTER_SMOKE_VALUE"
 	[[ $SKIP_FACE_SMOKE_VALUE == 0 || $SKIP_FACE_SMOKE_VALUE == 1 ]] \
@@ -402,6 +437,8 @@ main() {
 		printf 'rebuild_workload_base_for_templates=%s\n' "$REBUILD_WORKLOAD_BASE_FOR_TEMPLATES"
 		printf 'reuse_local_final_image=%s\n' "$REUSE_LOCAL_FINAL_IMAGE"
 		printf 'prepare_images_only=%s\n' "$PREPARE_IMAGES_ONLY"
+		printf 'hugepage_preflight_workload=%s\n' "$HUGEPAGE_PREFLIGHT_WORKLOAD"
+		printf 'hugepage_preflight_out=%s\n' "$HUGEPAGE_PREFLIGHT_OUT"
 	} >"$BACKUP_DIR/options"
 
 	if rg -q 'CONFIG_PLAT_INTEL_TDX' "$CONFIG_H"; then
@@ -532,6 +569,9 @@ main() {
 	if [[ $PREPARE_IMAGES_ONLY == 1 ]]; then
 		log "all selected runtime images passed preparation-only validation; skipping CVM launch"
 		return 0
+	fi
+	if [[ -n $HUGEPAGE_PREFLIGHT_WORKLOAD ]]; then
+		run_hugepage_preflight
 	fi
 
 	log "running Turbo-WRMSR-skip + SMP-bound workload set with old-ABI TDX shadow runtime: $OUT stop_after_smoke=$STOP_AFTER_SMOKE_VALUE"

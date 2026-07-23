@@ -137,6 +137,12 @@ verify_mode() {
 			|| fail "$mode host gate did not report ready: $gate_log"
 	done < <(find "$out/safety" -maxdepth 1 -type f -name 'host-*.log' | sort)
 	check_mode_restoration "$mode"
+	[[ $(< "$mode_root/hugepage-preflight/nr_hugepages-after-alloc") == 512 ]] \
+		|| fail "$mode HugeTLB preflight did not reserve 512 pages"
+	[[ $(< "$mode_root/hugepage-preflight/nr_hugepages-after-clean") == 0 ]] \
+		|| fail "$mode HugeTLB preflight did not restore the empty pool"
+	rg -q '^host_safety=ready$' "$mode_root/hugepage-preflight/host-after.log" \
+		|| fail "$mode post-HugeTLB host gate did not report ready"
 }
 
 run_mode() {
@@ -162,6 +168,8 @@ run_mode() {
 				COFUNC_OLDABI_RUNTIME_TRACE_PATCH="$7" \
 				COFUNC_OLDABI_RUNTIME_TRACE_MATRIX=1 \
 				COFUNC_OLDABI_REUSE_LOCAL_FINAL_IMAGE=1 \
+				COFUNC_OLDABI_HUGEPAGE_PREFLIGHT_WORKLOAD=fn_py_dna_visualisation \
+				COFUNC_OLDABI_HUGEPAGE_PREFLIGHT_OUT="$(dirname "$4")/hugepage-preflight" \
 				COFUNC_EPT_TRACE_URL="${EPT_TRACE_BASE_URL}" \
 				STOP_AFTER_SMOKE=0 \
 				COFUNC_OLDABI_SKIP_FACE_SMOKE=1 \

@@ -21,6 +21,10 @@ class FaultSavingsHarnessTest(unittest.TestCase):
         harness = (ROOT / "scripts/run_cofunc_prefault_fault_savings.sh").read_text()
         self.assertIn("COFUNC_OLDABI_REUSE_LOCAL_FINAL_IMAGE=1", harness)
         self.assertIn("COFUNC_OLDABI_PREPARE_IMAGES_ONLY=1", harness)
+        self.assertIn(
+            "COFUNC_OLDABI_HUGEPAGE_PREFLIGHT_WORKLOAD=fn_py_dna_visualisation",
+            harness,
+        )
         prepare = harness.index("prepare_images\n")
         first_baseline = harness.index("capture_dmesg before")
         final_baseline = harness.rindex("capture_dmesg before")
@@ -58,6 +62,18 @@ class FaultSavingsHarnessTest(unittest.TestCase):
             "if [[ $PREPARE_IMAGES_ONLY == 0 ]]; then\n"
             "\t\t\t[[ -n ${COFUNC_EPT_TRACE_URL:-} ]]",
             wrapper,
+        )
+
+    def test_mode_hugepage_preflight_is_largest_and_precedes_cvm(self):
+        wrapper = (
+            ROOT / "scripts/run_oldabi_turbo_smp_bound_tdx_runtime_smoke.sh"
+        ).read_text()
+        self.assertIn('actual_pages == "$expected_pages"', wrapper)
+        self.assertIn('after_pages == 0', wrapper)
+        self.assertIn('"$HOST_SAFETY_GATE" "after-hugepage-preflight-', wrapper)
+        self.assertLess(
+            wrapper.index("run_hugepage_preflight\n"),
+            wrapper.index('STOP_AFTER_SMOKE="$STOP_AFTER_SMOKE_VALUE"'),
         )
 
 

@@ -9450,3 +9450,13 @@ reservation during cleanup and did not compact memory like the workload path.
 It now compacts first and records HugeTLB/buddy state immediately before
 cleanup, including on failure. Do not retry the paired matrix until this
 bounded capacity probe succeeds for DNA.
+
+The corrected DNA probe passed at
+`/mnt/new_disk/cofunc_tdx_artifact/results/cofunc_fault_savings_hugepage_probe_20260723_033512`:
+512/512 pages were reserved, the complete 1 GiB file was populated, cleanup
+restored `nr_hugepages=0`, and the post-probe host gate was ready. This proves
+capacity after explicit compaction and identifies fragmentation as transient.
+The paired harness now repeats this exact largest-workload no-VM gate after
+each mode's image preparation and immediately before allowing that mode's
+first CVM. It requires 512 pages, an empty pool after cleanup, and a ready host
+safety gate; otherwise it stops before QEMU.
