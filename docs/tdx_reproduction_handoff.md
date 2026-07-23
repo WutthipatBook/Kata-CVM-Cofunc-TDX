@@ -9553,3 +9553,52 @@ assertion or a complete workload pass, verifies source/CMake/ISO restoration,
 and always runs the postflight safety gate. It never launches another
 workload. Only after this result should the collector gain a validated
 samples-7-through-12 resume and trace merger.
+
+### Thumbnailer probe passed; five-VM resume prepared
+
+The bounded probe passed at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_on_demand_thumbnail_probe_20260723_064711`.
+It produced stable sample ID 7, one paired handler window with 4,123 EPT
+exit/fault/service events, one valid analyzer row, and no private pre-fault
+marker. Its source, generated CMake state, and boot images restored exactly;
+the postflight gate was ready and prohibited kernel evidence was empty.
+
+The earlier Node clock assertion is therefore intermittent, not a
+deterministic result of true on-demand mode. Do not change the clock
+implementation for this diagnostic matrix. The passing probe is itself valid
+sample 7 because its mode, trace program, runtime/CVM patches, vCPU count,
+HugeTLB preflight, and no-retry policy match the matrix.
+
+The collector now supports a strict three-segment completion:
+
+- samples 1–6: the validated prefix from `050810/on-demand`;
+- sample 7: the validated passing Thumbnailer probe from `064711/on-demand`;
+- samples 8–12: five new launches in one no-retry resume.
+
+Before any new VM, it validates both reused mode roots, parent results,
+compiled on-demand images, trace framing, paired EPT lifecycle maps, workload
+rows, safety gates, kernel deltas, restoration evidence, and audited input
+hashes. It hashes both reused roots and external outputs and rechecks them
+after the resume.
+
+The new trace merger maps each segment's local BPF window numbers to the
+stable sample IDs carried by `signals.tsv`. It rejects missing, duplicate,
+overlapping, or unpaired windows and writes source hashes plus JSON
+provenance. The failed pre-window Thumbnailer attempt remains referenced in
+the merge provenance but is excluded from the 12-sample dataset.
+
+Run exactly:
+
+```bash
+sudo -v && \
+COFUNC_REUSE_PREFAULT_MODE_ROOT=/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_034000/on-demand \
+COFUNC_REUSE_ON_DEMAND_PARTIAL_ROOT=/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_050810/on-demand \
+COFUNC_REUSE_ON_DEMAND_THUMBNAIL_ROOT=/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_on_demand_thumbnail_probe_20260723_064711/on-demand \
+/home/booklyn/cofunc-tdx/scripts/run_cofunc_prefault_fault_savings.sh
+```
+
+This boundary launches at most five CVMs: Uploader and the four Alexa
+functions. It does not retry a failed launch. On success it validates the
+synthetic 12-window on-demand mode with the existing analyzer, verifies all
+three source segments remained immutable, compares against the reused
+pre-fault half, and generates the final fault-savings table and graph.

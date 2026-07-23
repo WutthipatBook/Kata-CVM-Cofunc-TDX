@@ -189,6 +189,50 @@ class FaultSavingsHarnessTest(unittest.TestCase):
         self.assertIn("source-state-after.sha256", probe)
         self.assertIn("post-cofunc-on-demand-thumbnail-probe", probe)
 
+    def test_matrix_resume_reuses_valid_windows_and_launches_only_samples_8_to_12(self):
+        harness = (
+            ROOT / "scripts/run_cofunc_prefault_fault_savings.sh"
+        ).read_text()
+        self.assertIn("COFUNC_REUSE_ON_DEMAND_PARTIAL_ROOT", harness)
+        self.assertIn("COFUNC_REUSE_ON_DEMAND_THUMBNAIL_ROOT", harness)
+        self.assertIn('PARTIAL_WORKLOADS=("${WORKLOADS[@]:0:6}")', harness)
+        self.assertIn('RESUME_WORKLOADS=("${WORKLOADS[@]:7}")', harness)
+        self.assertIn("--samples 1-6", harness)
+        self.assertIn("--command-rc 124", harness)
+        self.assertIn("--samples 7-7", harness)
+        self.assertIn("COFUNC_OLDABI_RUNTIME_WORKLOADS=\"$8\"", harness)
+        self.assertIn("verify_on_demand_segment \"$mode\" 8-12 5", harness)
+        self.assertIn("COFUNC_KVM_BUSY_RETRIES=1", harness)
+
+        partial_validation = harness.index("reuse_on_demand_partial\n")
+        thumbnail_validation = harness.index(
+            "reuse_on_demand_thumbnail\n", partial_validation
+        )
+        resume = harness.index("run_on_demand_resume\n", thumbnail_validation)
+        merge = harness.index("merge_on_demand_segments\n", resume)
+        self.assertLess(partial_validation, thumbnail_validation)
+        self.assertLess(thumbnail_validation, resume)
+        self.assertLess(resume, merge)
+
+    def test_matrix_merge_preserves_segment_provenance_and_immutability(self):
+        harness = (
+            ROOT / "scripts/run_cofunc_prefault_fault_savings.sh"
+        ).read_text()
+        merge = harness[
+            harness.index("merge_on_demand_segments()") :
+            harness.index("\nprepare_images()", harness.index("merge_on_demand_segments()"))
+        ]
+        self.assertIn("TRACE_MERGER", merge)
+        self.assertIn("--segment-samples 1-6", merge)
+        self.assertIn("--segment-samples 7-7", merge)
+        self.assertIn("--segment-samples 8-12", merge)
+        self.assertIn("excluded_attempt=", merge)
+        self.assertIn("verify_mode on-demand", merge)
+        self.assertIn("merged-output.sha256", merge)
+        self.assertIn("verify_reused_on_demand_unchanged", harness)
+        self.assertIn("reused-on-demand-partial-mode.verify", harness)
+        self.assertIn("reused-on-demand-thumbnail-mode.verify", harness)
+
 
 if __name__ == "__main__":
     unittest.main()
