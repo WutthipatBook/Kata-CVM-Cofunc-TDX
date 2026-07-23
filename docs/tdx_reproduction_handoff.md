@@ -9602,3 +9602,42 @@ functions. It does not retry a failed launch. On success it validates the
 synthetic 12-window on-demand mode with the existing analyzer, verifies all
 three source segments remained immutable, compares against the reused
 pre-fault half, and generates the final fault-savings table and graph.
+
+### Resume trace-launcher race; no VM launched
+
+The first five-VM resume attempt stopped during trace setup at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_071153`.
+Bpftrace had already written `trace_status ready` and published PID 3245060,
+but `run_ept_trace_around.sh` briefly checked the root-owned launcher with an
+unprivileged `kill -0`. The resulting `EPERM` was misclassified as an exited
+launcher. Cleanup then waited for that launcher without first refreshing the
+published child PID and signaling bpftrace, which explains the apparent hang.
+
+No VM or workload launched. The trace has zero signals, and no QEMU, Kata,
+bpftrace, or signal-server process remains. The current artifact source,
+configuration, and both guest ISOs exactly match all seven SHA-256 entries in
+the run's `source-state-before.sha256`. The user interrupted the blocked
+cleanup, so the outer harness did not write its normal postflight result.
+
+The trace wrapper now:
+
+- checks root-owned launchers through the existing sudo liveness helper;
+- refreshes child PIDs from their pidfiles before cleanup;
+- signals children before waiting for launcher completion;
+- uses bounded SIGINT/SIGTERM/SIGKILL escalation to prevent another wait
+  deadlock.
+
+Before any optional retry, run only:
+
+```bash
+sudo -v && \
+sudo -n /home/booklyn/cofunc-tdx/scripts/kata_tdx_host_safety_gate.sh \
+  post-interrupted-fault-trace
+```
+
+Scope checkpoint: Vanilla Kata-TDX runnable coverage, the complete 12/12
+measurement matrix, and its Fig. 11 graphs were already finished on July 16.
+The fault-savings matrix is a separate diagnostic requested later to compare
+handler-window EPT faults with and without CoFunc private pre-fault. It is
+useful for that causal question but is not required for the original Vanilla
+Kata-TDX goal.

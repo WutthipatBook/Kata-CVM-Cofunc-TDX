@@ -62,23 +62,40 @@ wait_for_root_process_exit() {
 stop_processes() {
 	(( processes_stopped == 0 )) || return 0
 	processes_stopped=1
+	[[ -n $trace_pid || ! -s $trace_pidfile ]] || trace_pid=$(<"$trace_pidfile")
+	[[ -n $server_pid || ! -s $server_pidfile ]] || server_pid=$(<"$server_pidfile")
 	if [[ -n $trace_pid ]]; then
 		sudo -n kill -INT "$trace_pid" 2>/dev/null || true
+	elif [[ -n $trace_launcher_pid ]]; then
+		sudo -n kill -TERM "$trace_launcher_pid" 2>/dev/null || true
+	fi
+	if [[ -n $trace_pid ]] && ! wait_for_root_process_exit "$trace_pid"; then
+		printf 'warning: bpftrace PID remains after SIGINT, sending SIGTERM: %s\n' \
+			"$trace_pid" >&2
+		sudo -n kill -TERM "$trace_pid" 2>/dev/null || true
+		if ! wait_for_root_process_exit "$trace_pid"; then
+			printf 'warning: bpftrace PID remains after SIGTERM, sending SIGKILL: %s\n' \
+				"$trace_pid" >&2
+			sudo -n kill -KILL "$trace_pid" 2>/dev/null || true
+			wait_for_root_process_exit "$trace_pid" || true
+		fi
 	fi
 	if [[ -n $trace_launcher_pid ]]; then
 		wait "$trace_launcher_pid" 2>/dev/null || true
 	fi
-	if [[ -n $trace_pid ]] && ! wait_for_root_process_exit "$trace_pid"; then
-		printf 'warning: bpftrace PID remains after SIGINT: %s\n' "$trace_pid" >&2
-	fi
 	if [[ -n $server_pid ]]; then
 		sudo -n kill -TERM "$server_pid" 2>/dev/null || true
+	elif [[ -n $server_launcher_pid ]]; then
+		sudo -n kill -TERM "$server_launcher_pid" 2>/dev/null || true
+	fi
+	if [[ -n $server_pid ]] && ! wait_for_root_process_exit "$server_pid"; then
+		printf 'warning: signal-server PID remains after SIGTERM, sending SIGKILL: %s\n' \
+			"$server_pid" >&2
+		sudo -n kill -KILL "$server_pid" 2>/dev/null || true
+		wait_for_root_process_exit "$server_pid" || true
 	fi
 	if [[ -n $server_launcher_pid ]]; then
 		wait "$server_launcher_pid" 2>/dev/null || true
-	fi
-	if [[ -n $server_pid ]] && ! wait_for_root_process_exit "$server_pid"; then
-		printf 'warning: signal-server PID remains after SIGTERM: %s\n' "$server_pid" >&2
 	fi
 }
 
@@ -154,7 +171,7 @@ for _ in $(seq 1 100); do
 	if [[ -n $server_pid ]] && ! root_process_alive "$server_pid"; then
 		cat "$server_stderr" >&2 || true
 		die "EPT signal server exited before becoming ready"
-	elif [[ -z $server_pid ]] && ! kill -0 "$server_launcher_pid" 2>/dev/null; then
+	elif [[ -z $server_pid ]] && ! root_process_alive "$server_launcher_pid"; then
 		cat "$server_stderr" >&2 || true
 		die "EPT signal-server launcher exited before publishing its PID"
 	fi
@@ -181,7 +198,7 @@ for _ in $(seq 1 300); do
 	if [[ -n $trace_pid ]] && ! root_process_alive "$trace_pid"; then
 		cat "$trace_stderr" >&2 || true
 		die "bpftrace exited before becoming ready"
-	elif [[ -z $trace_pid ]] && ! kill -0 "$trace_launcher_pid" 2>/dev/null; then
+	elif [[ -z $trace_pid ]] && ! root_process_alive "$trace_launcher_pid"; then
 		cat "$trace_stderr" >&2 || true
 		die "bpftrace launcher exited before publishing its PID"
 	fi
