@@ -9429,3 +9429,11 @@ installation or pull. A new preparation-only preflight builds and verifies all
 and permits the paired CVMs. Shell syntax and 11 offline tests pass. The next
 boundary remains the same command above; do not bypass the new image preflight
 or retry an individual failed workload.
+
+The first invocation of that preflight at
+`/home/booklyn/BookArchive/StageBreakdownRuns/cofunc_prefault_fault_savings_20260723_032514`
+stopped before source/image mutation because the lower wrapper still required
+`COFUNC_EPT_TRACE_URL`. That URL is consumed only during workload execution,
+which preparation-only mode explicitly skips. The validation now requires the
+URL only when CVM launch is enabled. Postflight was ready, evidence checks
+passed, and no VM launched.

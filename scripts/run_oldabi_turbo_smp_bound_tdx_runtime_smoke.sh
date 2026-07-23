@@ -299,7 +299,10 @@ main() {
 	if [[ -n $RUNTIME_TRACE_PATCH ]]; then
 		[[ -n $RUNTIME_METRICS_PATCH ]] || die "runtime trace patch requires the metrics patch"
 		[[ -f "$RUNTIME_TRACE_PATCH" ]] || die "missing runtime trace patch: $RUNTIME_TRACE_PATCH"
-		[[ -n ${COFUNC_EPT_TRACE_URL:-} ]] || die "runtime trace patch requires COFUNC_EPT_TRACE_URL"
+		if [[ $PREPARE_IMAGES_ONLY == 0 ]]; then
+			[[ -n ${COFUNC_EPT_TRACE_URL:-} ]] \
+				|| die "runtime trace patch requires COFUNC_EPT_TRACE_URL"
+		fi
 	fi
 	[[ -x "$CPU_SMOKE" ]] || die "missing smoke helper: $CPU_SMOKE"
 	[[ -f "$ACTION_SH" ]] || die "missing run_sc_fork action: $ACTION_SH"

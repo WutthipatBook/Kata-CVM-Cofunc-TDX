@@ -43,6 +43,11 @@ class FaultSavingsHarnessTest(unittest.TestCase):
         prepare_gate = wrapper.index("if [[ $PREPARE_IMAGES_ONLY == 1 ]]")
         cvm_launch = wrapper.index('STOP_AFTER_SMOKE="$STOP_AFTER_SMOKE_VALUE"')
         self.assertLess(prepare_gate, cvm_launch)
+        self.assertIn(
+            "if [[ $PREPARE_IMAGES_ONLY == 0 ]]; then\n"
+            "\t\t\t[[ -n ${COFUNC_EPT_TRACE_URL:-} ]]",
+            wrapper,
+        )
 
 
 if __name__ == "__main__":
